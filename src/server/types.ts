@@ -1,0 +1,130 @@
+import type { CompletionItem } from "vscode-languageserver/node";
+
+export interface CompletionSettings {
+  enable: boolean;
+  namespaces: string[];
+  maxItems: number;
+}
+
+export type SemanticTokenMode = "minimal" | "balanced";
+
+export interface SemanticTokenSettings {
+  enable: boolean;
+  mode: SemanticTokenMode;
+}
+
+export interface DiagnosticSettings {
+  enableUnknownSymbols: boolean;
+  enableCaseMismatch: boolean;
+  enableSemanticBinding?: boolean;
+  enableTypeChecking?: boolean;
+  maxSymbolDiagnostics: number;
+}
+
+export interface ImportValidationSettings {
+  enable: boolean;
+  pluginRoots: string[];
+  maxDiagnostics: number;
+}
+
+export interface ParserSettings {
+  enableUnparsableStatementDiagnostics: boolean;
+  maxDiagnostics: number;
+}
+
+export interface DependencySettings {
+  enableInfoTomlDependencies: boolean;
+  includeOptionalDependencies: boolean;
+  pluginRoots: string[];
+  maxDepth: number;
+  maxFiles: number;
+}
+
+export interface GameSymbolSourceSettings {
+  enabled: boolean;
+  openplanetCoreJsonPath: string;
+  gameJsonPath: string;
+  openplanetHeaderPath: string;
+}
+
+export interface SymbolSettings {
+  enableCoreJson: boolean;
+  enableGameJson: boolean;
+  enableHeader: boolean;
+  baseUserFolderPath: string;
+  trackmania2020: GameSymbolSourceSettings;
+  turbo: GameSymbolSourceSettings;
+  openplanet4: GameSymbolSourceSettings;
+}
+
+export interface OpenplanetLanguageServerSettings {
+  validateIncludes: boolean;
+  includePaths: string[];
+  maxIncludeDiagnostics: number;
+  imports: ImportValidationSettings;
+  parser: ParserSettings;
+  dependencies: DependencySettings;
+  diagnostics: DiagnosticSettings;
+  completion: CompletionSettings;
+  semanticTokens: SemanticTokenSettings;
+  symbols: SymbolSettings;
+}
+
+export interface CompletionBucket {
+  items: CompletionItem[];
+  seen: Set<string>;
+}
+
+export type TypeMemberKind = "property" | "method";
+
+export interface TypeMemberInfo {
+  name: string;
+  kind: TypeMemberKind;
+  type?: string;
+  returnType?: string;
+  args?: string;
+}
+
+export interface TypeInfo {
+  fullName: string;
+  shortName: string;
+  namespace: string;
+  parentShortName?: string;
+  members: TypeMemberInfo[];
+}
+
+export interface CompletionIndex {
+  global: CompletionBucket;
+  namespaceBuckets: Map<string, CompletionBucket>;
+  namespaceChildren: Map<string, Set<string>>;
+  typeInfoByFullName: Map<string, TypeInfo>;
+  typeFullNamesByShortName: Map<string, string[]>;
+  gameTypeFullNames: Set<string>;
+  resolvedMembersCache: Map<string, TypeMemberInfo[]>;
+  resolvedMemberCompletionsCache: Map<string, CompletionItem[]>;
+  coreGlobalFunctionNames: Set<string>;
+  coreGlobalFuncdefNames: Set<string>;
+  coreGlobalValueNames: Set<string>;
+  coreFunctionReturnTypes: Map<string, string>;
+  coreFunctionSignatures: Map<string, string[]>;
+  coreFunctionSignaturesByQualifiedName: Map<string, string[]>;
+}
+
+export interface TypeResolutionContext {
+  localVariableTypes: Map<string, string>;
+  localFunctionReturnTypes: Map<string, string>;
+}
+
+export type GameIdentifier = "trackmania2020" | "turbo" | "openplanet4";
+
+export interface GameDefinition {
+  id: GameIdentifier;
+  folder: string;
+  gameJsonFile: string;
+}
+
+export interface Logger {
+  info(message: string): void;
+  warn(message: string): void;
+  error(message: string): void;
+}

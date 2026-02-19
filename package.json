@@ -1,0 +1,303 @@
+{
+  "name": "openplanet-angelscript-languageserver",
+  "displayName": "Openplanet AngelScript Language Server",
+  "description": "Language Server features for Openplanet AngelScript. Pair with openplanet-angelscript-syntax for fast baseline highlighting.",
+  "version": "0.1.0",
+  "publisher": "ar",
+  "license": "Unlicense",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "openplanet",
+    "angelscript",
+    "trackmania",
+    "language-server"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/st-AR-gazer/openplanet-angelscript-languageserver.git"
+  },
+  "bugs": {
+    "url": "https://github.com/st-AR-gazer/openplanet-angelscript-languageserver/issues"
+  },
+  "homepage": "https://github.com/st-AR-gazer/openplanet-angelscript-languageserver#readme",
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:openplanet-angelscript",
+    "onCommand:openplanetLanguageServer.restartServer"
+  ],
+  "extensionDependencies": [
+    "ar.openplanet-angelscript-syntax"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "openplanetLanguageServer.restartServer",
+        "title": "Openplanet Language Server: Restart"
+      }
+    ],
+    "configuration": {
+      "title": "Openplanet AngelScript Language Server",
+      "properties": {
+        "openplanetLanguageServer.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the Openplanet AngelScript language server client."
+        },
+        "openplanetLanguageServer.validateIncludes": {
+          "type": "boolean",
+          "default": true,
+          "description": "Report diagnostics for #include files that cannot be resolved."
+        },
+        "openplanetLanguageServer.maxIncludeDiagnostics": {
+          "type": "number",
+          "default": 200,
+          "minimum": 0,
+          "description": "Maximum missing-include diagnostics per file."
+        },
+        "openplanetLanguageServer.includePaths": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Extra include roots. Relative paths are resolved from each workspace folder."
+        },
+        "openplanetLanguageServer.imports.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Validate import function targets against Openplanet plugin folders and .op packages."
+        },
+        "openplanetLanguageServer.imports.pluginRoots": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Plugin root directories to search for import targets (folders and .op files). Empty uses auto-detected roots."
+        },
+        "openplanetLanguageServer.imports.maxDiagnostics": {
+          "type": "number",
+          "default": 200,
+          "minimum": 0,
+          "description": "Maximum import validation diagnostics per file."
+        },
+        "openplanetLanguageServer.parser.enableUnparsableStatementDiagnostics": {
+          "type": "boolean",
+          "default": true,
+          "description": "Report diagnostics when the parser cannot recover a valid statement/declaration structure."
+        },
+        "openplanetLanguageServer.parser.maxDiagnostics": {
+          "type": "number",
+          "default": 200,
+          "minimum": 0,
+          "description": "Maximum parser structure diagnostics per file."
+        },
+        "openplanetLanguageServer.dependencies.enableInfoTomlDependencies": {
+          "type": "boolean",
+          "default": true,
+          "description": "Load cross-plugin symbol surfaces from info.toml dependencies during workspace indexing."
+        },
+        "openplanetLanguageServer.dependencies.includeOptionalDependencies": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include optional_dependencies from info.toml when dependency indexing is enabled."
+        },
+        "openplanetLanguageServer.dependencies.pluginRoots": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Plugin roots used for info.toml dependency resolution. Empty uses auto-detected roots."
+        },
+        "openplanetLanguageServer.dependencies.maxDepth": {
+          "type": "number",
+          "default": 4,
+          "minimum": 0,
+          "description": "Maximum transitive info.toml dependency depth."
+        },
+        "openplanetLanguageServer.dependencies.maxFiles": {
+          "type": "number",
+          "default": 2500,
+          "minimum": 0,
+          "description": "Maximum dependency .as files indexed from plugin folders/.op archives."
+        },
+        "openplanetLanguageServer.diagnostics.enableUnknownSymbols": {
+          "type": "boolean",
+          "default": true,
+          "description": "Report diagnostics for unresolved callable symbols."
+        },
+        "openplanetLanguageServer.diagnostics.enableCaseMismatch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Report diagnostics when symbol case differs from known API names."
+        },
+        "openplanetLanguageServer.diagnostics.enableSemanticBinding": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable scope-aware semantic binding diagnostics (duplicate declarations and use-before-declaration)."
+        },
+        "openplanetLanguageServer.diagnostics.enableTypeChecking": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable argument/assignment/operator/return type-compatibility diagnostics."
+        },
+        "openplanetLanguageServer.diagnostics.maxSymbolDiagnostics": {
+          "type": "number",
+          "default": 200,
+          "minimum": 0,
+          "description": "Maximum unknown/case-mismatch diagnostics per file."
+        },
+        "openplanetLanguageServer.completion.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable keyword and namespace-aware completions."
+        },
+        "openplanetLanguageServer.completion.namespaces": {
+          "type": "array",
+          "default": [
+            "UI",
+            "IO",
+            "Net",
+            "Json",
+            "Math",
+            "Text",
+            "Time",
+            "Meta",
+            "DataFileMgr",
+            "Editor"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Additional manual namespace completions suggested as <Namespace>::."
+        },
+        "openplanetLanguageServer.completion.maxItems": {
+          "type": "number",
+          "default": 500,
+          "minimum": 50,
+          "description": "Maximum completion items returned per request."
+        },
+        "openplanetLanguageServer.semanticTokens.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable semantic token responses from the language server."
+        },
+        "openplanetLanguageServer.semanticTokens.mode": {
+          "type": "string",
+          "default": "minimal",
+          "enum": ["minimal", "balanced"],
+          "description": "Semantic token intensity. minimal keeps syntax highlighter colors dominant; balanced applies broader semantic coloring."
+        },
+        "openplanetLanguageServer.symbols.enableCoreJson": {
+          "type": "boolean",
+          "default": true,
+          "description": "Load completions from OpenplanetCore.json."
+        },
+        "openplanetLanguageServer.symbols.enableGameJson": {
+          "type": "boolean",
+          "default": true,
+          "description": "Load namespace and engine-type completions from game-specific Openplanet JSON files."
+        },
+        "openplanetLanguageServer.symbols.enableHeader": {
+          "type": "boolean",
+          "default": true,
+          "description": "Load namespace and type completions from Openplanet.h."
+        },
+        "openplanetLanguageServer.symbols.baseUserFolderPath": {
+          "type": "string",
+          "default": "",
+          "description": "Base user folder path. Empty means current user home folder."
+        },
+        "openplanetLanguageServer.symbols.trackmania2020.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Trackmania 2020 symbol loading from OpenplanetNext."
+        },
+        "openplanetLanguageServer.symbols.trackmania2020.openplanetCoreJsonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Trackmania 2020 core JSON path. Empty means <baseUserFolder>/OpenplanetNext/OpenplanetCore.json."
+        },
+        "openplanetLanguageServer.symbols.trackmania2020.gameJsonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Trackmania 2020 game JSON path. Empty means <baseUserFolder>/OpenplanetNext/OpenplanetNext.json."
+        },
+        "openplanetLanguageServer.symbols.trackmania2020.openplanetHeaderPath": {
+          "type": "string",
+          "default": "",
+          "description": "Trackmania 2020 header path. Empty means <baseUserFolder>/OpenplanetNext/Openplanet.h."
+        },
+        "openplanetLanguageServer.symbols.turbo.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable Trackmania Turbo symbol loading from OpenplanetTurbo."
+        },
+        "openplanetLanguageServer.symbols.turbo.openplanetCoreJsonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Turbo core JSON path. Empty means <baseUserFolder>/OpenplanetTurbo/OpenplanetCore.json."
+        },
+        "openplanetLanguageServer.symbols.turbo.gameJsonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Turbo game JSON path. Empty means <baseUserFolder>/OpenplanetTurbo/OpenplanetTurbo.json."
+        },
+        "openplanetLanguageServer.symbols.turbo.openplanetHeaderPath": {
+          "type": "string",
+          "default": "",
+          "description": "Turbo header path. Empty means <baseUserFolder>/OpenplanetTurbo/Openplanet.h."
+        },
+        "openplanetLanguageServer.symbols.openplanet4.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable Openplanet4 symbol loading from Openplanet4."
+        },
+        "openplanetLanguageServer.symbols.openplanet4.openplanetCoreJsonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Openplanet4 core JSON path. Empty means <baseUserFolder>/Openplanet4/OpenplanetCore.json."
+        },
+        "openplanetLanguageServer.symbols.openplanet4.gameJsonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Openplanet4 game JSON path. Empty means <baseUserFolder>/Openplanet4/Openplanet4.json."
+        },
+        "openplanetLanguageServer.symbols.openplanet4.openplanetHeaderPath": {
+          "type": "string",
+          "default": "",
+          "description": "Openplanet4 header path. Empty means <baseUserFolder>/Openplanet4/Openplanet.h."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p .",
+    "test": "npm run compile && node out/test/runTests.js",
+    "test:integration": "npm run compile && node out/test/runIntegrationTests.js",
+    "test:interactive": "npm run compile && node out/test/runInteractiveTests.js",
+    "release:check-changelog": "node scripts/release/checkChangelog.mjs",
+    "release:package": "npx @vscode/vsce package --no-yarn",
+    "release:smoke": "node scripts/release/smokeVsix.mjs",
+    "release:verify": "npm run release:check-changelog && npm run test && npm run test:integration && npm run release:package && npm run release:smoke",
+    "vscode:prepublish": "npm run compile"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1",
+    "vscode-languageserver": "^9.0.1",
+    "vscode-languageserver-textdocument": "^1.0.11",
+    "vscode-uri": "^3.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.57",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.8.2"
+  }
+}

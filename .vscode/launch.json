@@ -1,0 +1,53 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Interactive Tests (Showcase)",
+      "type": "extensionHost",
+      "request": "launch",
+      "runtimeExecutable": "${execPath}",
+      "args": [
+        "--new-window",
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "--extensionDevelopmentPath=${workspaceFolder}/../openplanet-angelscript-syntax",
+        "${workspaceFolder}/test-files",
+        "--goto",
+        "${workspaceFolder}/test-files/LanguageServerShowcase.as:1:1"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/out/**/*.js"
+      ],
+      "preLaunchTask": "npm: compile"
+    },
+    {
+      "name": "Run Syntax + Language Server",
+      "type": "extensionHost",
+      "request": "launch",
+      "runtimeExecutable": "${execPath}",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "--extensionDevelopmentPath=${workspaceFolder}/../openplanet-angelscript-syntax"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/out/**/*.js"
+      ],
+      "preLaunchTask": "npm: compile"
+    },
+    {
+      "name": "Attach Language Server (6009)",
+      "type": "node",
+      "request": "attach",
+      "port": 6009,
+      "restart": true
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Run Interactive Tests + Attach Server",
+      "configurations": [
+        "Run Interactive Tests (Showcase)",
+        "Attach Language Server (6009)"
+      ]
+    }
+  ]
+}
