@@ -45,7 +45,8 @@ const keywordCompletionItems: CompletionItem[] = languageKeywords.map(
 export function createCompletionBucket(): CompletionBucket {
   return {
     items: [],
-    seen: new Set<string>()
+    seen: new Set<string>(),
+    functionByLabel: new Map<string, CompletionItem>()
   };
 }
 
@@ -78,20 +79,34 @@ export function addSymbol(
     registerNamespacePath(index, normalizedNamespace);
   }
 
+  const normalizedItem = normalizeCompletionItem(item);
+
   const bucket = normalizedNamespace
     ? getNamespaceBucket(index, normalizedNamespace)
     : index.global;
+
+  if (normalizedItem.kind === CompletionItemKind.Function) {
+    const existing = bucket.functionByLabel.get(normalizedItem.label);
+    if (existing) {
+      mergeFunctionCompletionItems(existing, normalizedItem);
+      return;
+    }
+
+    initializeFunctionCompletionItem(normalizedItem);
+    bucket.functionByLabel.set(normalizedItem.label, normalizedItem);
+    bucket.items.push(normalizedItem);
+    return;
+  }
+
   const dedupeKey =
-    item.kind === CompletionItemKind.Function
-      ? `${item.label}|${item.kind ?? 0}|${item.detail ?? ""}`
-      : `${item.label}|${item.kind ?? 0}`;
+    `${normalizedItem.label}|${normalizedItem.kind ?? 0}`;
 
   if (bucket.seen.has(dedupeKey)) {
     return;
   }
 
   bucket.seen.add(dedupeKey);
-  bucket.items.push(item);
+  bucket.items.push(normalizedItem);
 }
 
 export function registerNamespacePath(
@@ -161,6 +176,234 @@ function getNamespaceChildrenSet(
   return set;
 }
 
+function normalizeCompletionItem(item: CompletionItem): CompletionItem {
+  if (item.kind === CompletionItemKind.Function) {
+    return normalizeFunctionCompletionItem(item);
+  }
+
+  if (item.kind !== CompletionItemKind.Enum) {
+    return item;
+  }
+
+  const insertText =
+    typeof item.insertText === "string" && item.insertText.length > 0
+      ? item.insertText
+      : `${item.label}::`;
+
+  const command =
+    item.command ??
+    {
+      title: "Trigger Suggestions",
+      command: "editor.action.triggerSuggest"
+    };
+
+  return {
+    ...item,
+    insertText,
+    command
+  };
+}
+
+function normalizeFunctionCompletionItem(item: CompletionItem): CompletionItem {
+  const signature = typeof item.detail === "string" ? item.detail.trim() : "";
+  const returnType = parseReturnTypeFromFunctionSignature(signature, item.label);
+
+  if (!signature || !returnType) {
+    return item;
+  }
+
+  const labelDetails = item.labelDetails
+    ? {
+        ...item.labelDetails,
+        description: item.labelDetails.description ?? returnType
+      }
+    : { description: returnType };
+
+  const dataRecord =
+    typeof item.data === "object" && item.data !== null
+      ? ({ ...(item.data as Record<string, unknown>) } as Record<string, unknown>)
+      : {};
+  if (typeof dataRecord.signature !== "string" || dataRecord.signature.length === 0) {
+    dataRecord.signature = signature;
+  }
+
+  const normalized: CompletionItem = {
+    ...item,
+    labelDetails,
+    data: dataRecord
+  };
+
+  if (signature.includes(`${item.label}(`)) {
+    normalized.detail = returnType;
+  }
+
+  return normalized;
+}
+
+function initializeFunctionCompletionItem(item: CompletionItem): void {
+  const signatures = collectFunctionSignatures(item);
+  if (signatures.length === 0) {
+    return;
+  }
+
+  setFunctionSignatures(item, signatures);
+  applyFunctionOverloadSummary(item, signatures);
+}
+
+function mergeFunctionCompletionItems(
+  existing: CompletionItem,
+  incoming: CompletionItem
+): void {
+  const signatures = dedupeStrings([
+    ...collectFunctionSignatures(existing),
+    ...collectFunctionSignatures(incoming)
+  ]);
+  if (signatures.length === 0) {
+    return;
+  }
+
+  setFunctionSignatures(existing, signatures);
+  applyFunctionOverloadSummary(existing, signatures);
+}
+
+function applyFunctionOverloadSummary(
+  item: CompletionItem,
+  signatures: string[]
+): void {
+  const returnTypes = dedupeStrings(
+    signatures
+      .map((signature) =>
+        parseReturnTypeFromFunctionSignature(signature, item.label)
+      )
+      .filter((value): value is string => typeof value === "string")
+  );
+  const returnType =
+    returnTypes.length === 1
+      ? returnTypes[0]
+      : returnTypes.length > 1
+        ? "overloaded"
+        : typeof item.detail === "string" && item.detail.length > 0
+          ? item.detail
+          : "function";
+  const overloadSuffix =
+    signatures.length > 1
+      ? ` (+${signatures.length - 1} overload${signatures.length - 1 === 1 ? "" : "s"})`
+      : "";
+
+  item.detail = `${returnType}${overloadSuffix}`;
+  item.labelDetails = item.labelDetails
+    ? {
+        ...item.labelDetails,
+        description: returnType
+      }
+    : { description: returnType };
+  item.documentation = {
+    kind: "markdown",
+    value: [
+      `**Overloads (${signatures.length})**`,
+      ...signatures.map((signature) => `- \`${signature}\``),
+      "",
+      "Use parameter hints (left/right arrows) to browse overloads after inserting the call."
+    ].join("\n")
+  };
+  item.command = {
+    title: "Trigger Parameter Hints",
+    command: "editor.action.triggerParameterHints"
+  };
+}
+
+function collectFunctionSignatures(item: CompletionItem): string[] {
+  const signatures: string[] = [];
+  if (typeof item.data === "object" && item.data !== null) {
+    const record = item.data as Record<string, unknown>;
+    if (Array.isArray(record.overloads)) {
+      for (const overload of record.overloads) {
+        if (typeof overload === "string" && overload.length > 0) {
+          signatures.push(overload);
+        }
+      }
+    }
+    if (typeof record.signature === "string" && record.signature.length > 0) {
+      signatures.push(record.signature);
+    }
+  }
+
+  return dedupeStrings(signatures);
+}
+
+function setFunctionSignatures(item: CompletionItem, signatures: string[]): void {
+  const record =
+    typeof item.data === "object" && item.data !== null
+      ? ({ ...(item.data as Record<string, unknown>) } as Record<string, unknown>)
+      : {};
+  record.overloads = signatures;
+  if (typeof record.signature !== "string" || record.signature.length === 0) {
+    record.signature = signatures[0];
+  }
+  item.data = record;
+}
+
+function dedupeStrings(values: string[]): string[] {
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (!value || seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    output.push(value);
+  }
+  return output;
+}
+
+function parseReturnTypeFromFunctionSignature(
+  signature: string,
+  functionName: string
+): string | undefined {
+  const nameIndex = signature.indexOf(functionName);
+  if (nameIndex < 0) {
+    return undefined;
+  }
+
+  const beforeName = signature.slice(0, nameIndex).trim();
+  if (!beforeName) {
+    return undefined;
+  }
+
+  const tokens = beforeName.split(/\s+/).filter((token) => token.length > 0);
+  if (tokens.length === 0) {
+    return undefined;
+  }
+
+  while (tokens.length > 1 && isDeclarationModifier(tokens[0])) {
+    tokens.shift();
+  }
+
+  for (let i = tokens.length - 1; i >= 0; i -= 1) {
+    const token = tokens[i];
+    if (/^[A-Za-z_][A-Za-z0-9_:<>@&]*$/.test(token)) {
+      return token;
+    }
+  }
+
+  return tokens[tokens.length - 1];
+}
+
+function isDeclarationModifier(token: string): boolean {
+  switch (token) {
+    case "const":
+    case "shared":
+    case "private":
+    case "protected":
+    case "final":
+    case "override":
+    case "external":
+      return true;
+    default:
+      return false;
+  }
+}
+
 export function collectCompletionItems(
   index: CompletionIndex,
   activeNamespace: string | undefined
@@ -227,4 +470,39 @@ export function getActiveNamespaceAtPosition(
   }
 
   return normalizeNamespace(match[1]);
+}
+
+export function resolveCompletionItemDetails(item: CompletionItem): CompletionItem {
+  if (item.kind !== CompletionItemKind.Function) {
+    return item;
+  }
+
+  const signatures = collectFunctionSignatures(item);
+  if (signatures.length === 0) {
+    return item;
+  }
+
+  const resolved: CompletionItem = {
+    ...item
+  };
+  const primarySignature = signatures[0];
+  const overloadSuffix =
+    signatures.length > 1
+      ? ` (+${signatures.length - 1} overload${signatures.length - 1 === 1 ? "" : "s"})`
+      : "";
+
+  resolved.detail = `${primarySignature}${overloadSuffix}`;
+  resolved.documentation = {
+    kind: "markdown",
+    value: [
+      `**${resolved.label}**`,
+      "",
+      `**Overloads (${signatures.length})**`,
+      ...signatures.map((signature) => `- \`${signature}\``),
+      "",
+      "Use left/right arrows in parameter hints to switch overloads."
+    ].join("\n")
+  };
+
+  return resolved;
 }

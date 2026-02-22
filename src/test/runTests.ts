@@ -2,11 +2,22 @@ import * as assert from "assert";
 import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
-import { DiagnosticSeverity, DocumentHighlightKind, SymbolKind } from "vscode-languageserver/node";
+import {
+  CompletionItemKind,
+  DiagnosticSeverity,
+  DocumentHighlightKind,
+  SymbolKind
+} from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
 import { URI } from "vscode-uri";
 import { analyzeDocument, getTypeResolutionContextAtPosition } from "../server/analysis";
-import { createCompletionIndex } from "../server/completions";
+import {
+  addSymbol,
+  collectCompletionItems,
+  createCompletionIndex,
+  registerNamespacePath,
+  resolveCompletionItemDetails
+} from "../server/completions";
 import {
   buildQuickFixCodeActions,
   getSemanticDiagnostics,
@@ -20,6 +31,10 @@ import { getCodeLensesForDocument } from "../server/codeLenses";
 import { getDocumentColors, getColorPresentations } from "../server/colors";
 import { tryResolveExpressionTypeFullName } from "../server/members";
 import {
+  evaluateAssignmentOperatorCompatibility,
+  inferExpressionTypeFromText
+} from "../server/compilerPipeline";
+import {
   getDocumentHighlightsAtPosition,
   getImplementationAtPosition,
   getRenameWorkspaceEditAtPosition,
@@ -32,12 +47,18 @@ import {
   buildDocumentSemanticTokens,
   semanticTokenTypes
 } from "../server/semanticTokens";
+import { createDefaultSettings } from "../server/settings";
+import { buildCompletionIndex } from "../server/symbols";
 import {
   getTypeHierarchySubtypes,
   getTypeHierarchySupertypes,
   prepareTypeHierarchyAtPosition
 } from "../server/typeHierarchy";
 import { buildWorkspaceAnalysisIndex } from "../server/workspaceIndex";
+import {
+  parseGrammarPipeline,
+  type GrammarCallableDeclarationNode
+} from "../server/grammarPipeline";
 import { seedTestSymbols } from "./seedTestSymbols";
 
 async function main(): Promise<void> {
@@ -52,6 +73,12 @@ async function main(): Promise<void> {
   testUnclosedParenDoesNotCascadeToMissingBlockCloseDiagnostic();
   testVariableDeclarationParsingMultiDeclarator();
   testFunctionParameterDefaultInitializerListParsing();
+  testEnumCompletionCommitsWithNamespaceChain();
+  testEnumMembersOnlyShownInsideEnumScope();
+  testFunctionCompletionShowsReturnTypeWithoutDuplicateName();
+  testFunctionCompletionResolveShowsSignatureName();
+  testGrammarCallableDeclarations();
+  testGrammarCallableNestedTemplateParameterParsing();
   testIncludeDirectiveDoesNotPolluteFunctionReturnType(index);
   testTypeResolution(index);
   testBindingDuplicateDeclarationDiagnostic(index);
@@ -60,6 +87,9 @@ async function main(): Promise<void> {
   testCaseMismatchDiagnostic(index);
   testUnknownMemberDiagnostic(index);
   testUnknownIdentifierDiagnostic(index);
+  testUsingKnownNamespaceDoesNotProduceUnknownIdentifier(index);
+  testNamespacedExpressionDoesNotProduceUnknownType(index);
+  testNamespacedEnumTypeAndValueRecognized(index);
   testUnknownTypeDiagnostic(index);
   testArityMismatchDiagnostic(index);
   testCallArgumentTypeMismatchDiagnostic(index);
@@ -68,6 +98,10 @@ async function main(): Promise<void> {
   testOperatorExpressionTypingInCall(index);
   testAssignmentTypeMismatchDiagnostic(index);
   testOperatorTypeMismatchDiagnostic(index);
+  testOperatorMethodAssignmentCompatibility(index);
+  testImplicitOperatorConversionCompatibility(index);
+  testIndexedOperatorTypeInference(index);
+  testMemberCallTypeMismatchDiagnostic(index);
   testReturnTypeMismatchDiagnostic(index);
   testInvalidMemberCallDiagnostic(index);
   testIntrinsicCastCallIgnored(index);
@@ -106,6 +140,8 @@ async function main(): Promise<void> {
   await testImportValidationSignatureMismatchQuickFix();
   await testWorkspaceAnalysisIndexSkipsOpenDocuments();
   await testWorkspaceAnalysisIndexLoadsInfoTomlDependencies();
+  await testCompletionIndexGameProfileSelection();
+  await testCompletionIndexGameProfilePathOverrides();
   await testMissingIncludeDiagnosticSeverity();
 
   console.log("All tests passed.");
@@ -264,6 +300,140 @@ function testUnknownIdentifierDiagnostic(
   assert.ok(
     diagnostics.some((diagnostic) => diagnostic.code === "unknown-identifier"),
     "Expected unknown identifier diagnostic for value."
+  );
+}
+
+function testUsingKnownNamespaceDoesNotProduceUnknownIdentifier(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  const source = ["using namespace UI;", "", "void Main() {", "  Text(\"ok\");", "}"].join(
+    "\n"
+  );
+  const document = TextDocument.create(
+    "file:///known-using-namespace.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+  const diagnostics = getSemanticDiagnostics(
+    document,
+    analysis,
+    [analysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 20
+    }
+  );
+
+  assert.ok(
+    !diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "unknown-identifier" && diagnostic.range.start.line === 0
+    ),
+    "Expected known namespace in using directive to avoid unknown identifier diagnostics."
+  );
+}
+
+function testNamespacedExpressionDoesNotProduceUnknownType(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  const source = [
+    "void Main() {",
+    "  UI::AllowDoubleClick::break;",
+    "}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///namespaced-expression-not-declaration.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+  const diagnostics = getSemanticDiagnostics(
+    document,
+    analysis,
+    [analysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 20
+    }
+  );
+
+  assert.ok(
+    !diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "unknown-type" &&
+        diagnostic.message.includes("UI::")
+    ),
+    "Expected namespace chains to avoid bogus unknown-type diagnostics from declaration recovery."
+  );
+}
+
+function testNamespacedEnumTypeAndValueRecognized(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  registerNamespacePath(index, "UI::InputBlocking");
+  index.typeInfoByFullName.set("UI::InputBlocking", {
+    fullName: "UI::InputBlocking",
+    shortName: "InputBlocking",
+    namespace: "UI",
+    members: []
+  });
+  const inputBlockingTypes = index.typeFullNamesByShortName.get("InputBlocking") ?? [];
+  if (!inputBlockingTypes.includes("UI::InputBlocking")) {
+    inputBlockingTypes.push("UI::InputBlocking");
+    index.typeFullNamesByShortName.set("InputBlocking", inputBlockingTypes);
+  }
+  addSymbol(index, "UI::InputBlocking", {
+    label: "None",
+    kind: CompletionItemKind.EnumMember,
+    detail: "Enum value (InputBlocking)"
+  });
+
+  const source = [
+    "void Main() {",
+    "  UI::InputBlocking flags = UI::InputBlocking::None;",
+    "}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///namespaced-enum-known.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+  const diagnostics = getSemanticDiagnostics(
+    document,
+    analysis,
+    [analysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 30
+    }
+  );
+
+  assert.ok(
+    !diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "unknown-type" &&
+        diagnostic.message.includes("UI::InputBlocking")
+    ),
+    "Expected known namespaced enum type to avoid unknown-type diagnostics."
+  );
+  assert.ok(
+    !diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "unknown-identifier" &&
+        diagnostic.message.includes("\"None\"")
+    ),
+    "Expected known namespaced enum member to avoid unknown-identifier diagnostics."
   );
 }
 
@@ -563,6 +733,166 @@ function testOperatorTypeMismatchDiagnostic(
   assert.ok(
     mismatch,
     "Expected operator-type-mismatch diagnostic for string -= int."
+  );
+}
+
+function testOperatorMethodAssignmentCompatibility(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  index.typeInfoByFullName.set("Math::Accum", {
+    fullName: "Math::Accum",
+    shortName: "Accum",
+    namespace: "Math",
+    members: [
+      {
+        name: "opAddAssign",
+        kind: "method",
+        returnType: "Math::Accum@",
+        args: "int value"
+      }
+    ]
+  });
+  index.typeFullNamesByShortName.set("Accum", ["Math::Accum"]);
+
+  const compatibility = evaluateAssignmentOperatorCompatibility(
+    index,
+    "+=",
+    "Accum@",
+    "int"
+  );
+  assert.strictEqual(
+    compatibility,
+    "compatible",
+    "Expected operator overload opAddAssign to make '+=' assignment compatible."
+  );
+}
+
+function testImplicitOperatorConversionCompatibility(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  index.typeInfoByFullName.set("Math::Meters", {
+    fullName: "Math::Meters",
+    shortName: "Meters",
+    namespace: "Math",
+    members: [
+      {
+        name: "opImplConv",
+        kind: "method",
+        returnType: "float",
+        args: ""
+      }
+    ]
+  });
+  index.typeFullNamesByShortName.set("Meters", ["Math::Meters"]);
+
+  const compatibility = evaluateAssignmentOperatorCompatibility(
+    index,
+    "=",
+    "float",
+    "Meters"
+  );
+  assert.strictEqual(
+    compatibility,
+    "compatible",
+    "Expected implicit conversion operator opImplConv to satisfy assignment compatibility."
+  );
+}
+
+function testIndexedOperatorTypeInference(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  index.typeInfoByFullName.set("Math::Grid", {
+    fullName: "Math::Grid",
+    shortName: "Grid",
+    namespace: "Math",
+    members: [
+      {
+        name: "opIndex",
+        kind: "method",
+        returnType: "float",
+        args: "int index"
+      }
+    ]
+  });
+  index.typeFullNamesByShortName.set("Grid", ["Math::Grid"]);
+
+  const context = {
+    localVariableTypes: new Map<string, string>([
+      ["grid", "Grid"],
+      ["arr", "array<int>"]
+    ]),
+    localFunctionReturnTypes: new Map<string, string>(),
+    functionSources: {
+      workspaceFunctionSignaturesByName: new Map(),
+      coreFunctionSignaturesByName: new Map(),
+      qualifiedFunctionSignaturesByName: new Map()
+    }
+  };
+
+  const indexedType = inferExpressionTypeFromText(index, "grid[0]", context);
+  assert.strictEqual(
+    indexedType,
+    "float",
+    "Expected opIndex(int) overload to infer the element type for index access."
+  );
+
+  const genericIndexedType = inferExpressionTypeFromText(index, "arr[1]", context);
+  assert.strictEqual(
+    genericIndexedType,
+    "int",
+    "Expected array<T> index access to infer template element type."
+  );
+}
+
+function testMemberCallTypeMismatchDiagnostic(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  index.typeInfoByFullName.set("Math::MemberOps", {
+    fullName: "Math::MemberOps",
+    shortName: "MemberOps",
+    namespace: "Math",
+    members: [
+      {
+        name: "Scale",
+        kind: "method",
+        returnType: "void",
+        args: "float value"
+      }
+    ]
+  });
+  index.typeFullNamesByShortName.set("MemberOps", ["Math::MemberOps"]);
+
+  const source = [
+    "void Main() {",
+    "  MemberOps ops;",
+    "  ops.Scale(\"bad\");",
+    "}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///member-call-type-mismatch.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+  const diagnostics = getSemanticDiagnostics(
+    document,
+    analysis,
+    [analysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 40
+    }
+  );
+
+  const mismatch = diagnostics.find(
+    (diagnostic) => diagnostic.code === "call-argument-type-mismatch"
+  );
+  assert.ok(
+    mismatch,
+    "Expected member calls with incompatible argument types to emit call-argument-type-mismatch."
   );
 }
 
@@ -1704,6 +2034,82 @@ function testDocumentSymbols(): void {
   assert.strictEqual(analysis.documentSymbols[1].name, "B");
 }
 
+function testGrammarCallableDeclarations(): void {
+  const source = [
+    "funcdef void DemoFunc(ref@ value);",
+    'import MwId RemoteTick(int count, const string &in label = "x") from "SyntaxDemo";'
+  ].join("\n");
+  const parsed = parseGrammarPipeline(source);
+  const callableDeclarations = parsed.program.declarations.filter(
+    (declaration): declaration is GrammarCallableDeclarationNode =>
+      declaration.kind === "callable-declaration"
+  );
+
+  assert.strictEqual(
+    parsed.errors.length,
+    0,
+    "Expected callable declaration grammar parsing to avoid parser errors."
+  );
+  assert.strictEqual(
+    callableDeclarations.length,
+    2,
+    "Expected parser to capture funcdef and import callable declarations."
+  );
+
+  const funcdef = callableDeclarations.find(
+    (declaration) => declaration.declarationKind === "funcdef"
+  );
+  assert.ok(funcdef, "Expected funcdef declaration node.");
+  assert.strictEqual(funcdef?.name, "DemoFunc");
+  assert.strictEqual(funcdef?.returnTypeText, "void");
+  assert.strictEqual(funcdef?.parameters.length, 1);
+  assert.strictEqual(funcdef?.parameters[0]?.name, "value");
+
+  const imported = callableDeclarations.find(
+    (declaration) => declaration.declarationKind === "import"
+  );
+  assert.ok(imported, "Expected import declaration node.");
+  assert.strictEqual(imported?.name, "RemoteTick");
+  assert.strictEqual(imported?.returnTypeText, "MwId");
+  assert.strictEqual(imported?.moduleName, "SyntaxDemo");
+  assert.strictEqual(imported?.parameters.length, 2);
+  assert.ok(
+    imported?.parameters[1]?.optional,
+    "Expected import declaration parser to track optional parameters."
+  );
+
+  assert.strictEqual(
+    source.slice(imported?.moduleNameStart ?? 0, imported?.moduleNameEnd ?? 0),
+    "SyntaxDemo",
+    "Expected import module offsets to point at the unquoted module name text."
+  );
+}
+
+function testGrammarCallableNestedTemplateParameterParsing(): void {
+  const source =
+    "funcdef void Accept(array<array<int>>@ values, int count = 0);";
+  const parsed = parseGrammarPipeline(source);
+  const callable = parsed.program.declarations.find(
+    (declaration): declaration is GrammarCallableDeclarationNode =>
+      declaration.kind === "callable-declaration"
+  );
+
+  assert.ok(callable, "Expected callable declaration in parsed program.");
+  assert.strictEqual(
+    parsed.errors.length,
+    0,
+    "Expected nested template callable declaration to parse without errors."
+  );
+  assert.strictEqual(
+    callable?.parameters.length,
+    2,
+    "Expected nested-template parameter list to split correctly at top-level commas."
+  );
+  assert.strictEqual(callable?.parameters[0]?.name, "values");
+  assert.strictEqual(callable?.parameters[1]?.name, "count");
+  assert.ok(callable?.parameters[1]?.optional);
+}
+
 function testSyntaxUnclosedDelimiterDiagnostic(): void {
   const source = ["void Main() {", "  GetApp(", "}"].join("\n");
   const document = TextDocument.create(
@@ -1887,6 +2293,164 @@ function testVariableDeclarationParsingMultiDeclarator(): void {
   assert.ok(
     localNames.includes("second"),
     "Expected second declarator in a comma declaration list to be parsed as a local declaration."
+  );
+}
+
+function testEnumCompletionCommitsWithNamespaceChain(): void {
+  const index = createCompletionIndex();
+  addSymbol(index, "UI", {
+    label: "InputBlocking",
+    kind: CompletionItemKind.Enum,
+    detail: "Openplanet enum"
+  });
+  addSymbol(index, "UI", {
+    label: "Texture",
+    kind: CompletionItemKind.Class,
+    detail: "Openplanet class"
+  });
+
+  const items = collectCompletionItems(index, "UI");
+  const enumItem = items.find(
+    (item) =>
+      item.kind === CompletionItemKind.Enum && item.label === "InputBlocking"
+  );
+  assert.ok(enumItem, "Expected enum completion item for InputBlocking.");
+  assert.strictEqual(
+    enumItem?.insertText,
+    "InputBlocking::",
+    "Expected enum completion commit to include trailing namespace scope operator."
+  );
+  assert.strictEqual(
+    enumItem?.command?.command,
+    "editor.action.triggerSuggest",
+    "Expected enum completion commit to retrigger suggestions for enum members."
+  );
+
+  const classItem = items.find(
+    (item) => item.kind === CompletionItemKind.Class && item.label === "Texture"
+  );
+  assert.ok(classItem, "Expected class completion item for Texture.");
+  assert.notStrictEqual(
+    classItem?.insertText,
+    "Texture::",
+    "Expected non-enum completion commits to keep default insert behavior."
+  );
+}
+
+function testEnumMembersOnlyShownInsideEnumScope(): void {
+  const index = createCompletionIndex();
+  addSymbol(index, "UI", {
+    label: "SelectableFlags",
+    kind: CompletionItemKind.Enum,
+    detail: "Openplanet enum"
+  });
+  addSymbol(index, "UI::SelectableFlags", {
+    label: "SpanAllColumns",
+    kind: CompletionItemKind.EnumMember,
+    detail: "Enum value (SelectableFlags)"
+  });
+
+  const parentNamespaceItems = collectCompletionItems(index, "UI");
+  assert.ok(
+    !parentNamespaceItems.some(
+      (item) =>
+        item.kind === CompletionItemKind.EnumMember &&
+        item.label === "SpanAllColumns"
+    ),
+    "Expected enum members to be hidden in parent namespace completion lists."
+  );
+
+  const enumScopeItems = collectCompletionItems(index, "UI::SelectableFlags");
+  assert.ok(
+    enumScopeItems.some(
+      (item) =>
+        item.kind === CompletionItemKind.EnumMember &&
+        item.label === "SpanAllColumns"
+    ),
+    "Expected enum members to appear when completing inside enum scope."
+  );
+}
+
+function testFunctionCompletionShowsReturnTypeWithoutDuplicateName(): void {
+  const index = createCompletionIndex();
+  addSymbol(index, "UI", {
+    label: "AlignTextToFramePadding",
+    kind: CompletionItemKind.Function,
+    detail: "void AlignTextToFramePadding()"
+  });
+
+  addSymbol(index, "UI", {
+    label: "AlignTextToFramePadding",
+    kind: CompletionItemKind.Function,
+    detail: "void AlignTextToFramePadding(float offset)"
+  });
+
+  const items = collectCompletionItems(index, "UI").filter(
+    (item) =>
+      item.kind === CompletionItemKind.Function &&
+      item.label === "AlignTextToFramePadding"
+  );
+  assert.strictEqual(
+    items.length,
+    1,
+    "Expected function overload completion entries to be merged by name."
+  );
+
+  const item = items[0];
+  assert.strictEqual(
+    item.detail,
+    "void (+1 overload)",
+    "Expected merged function completion detail to include return type and overload count."
+  );
+  assert.strictEqual(
+    item.labelDetails?.description,
+    "void",
+    "Expected function completion inline description to display return type."
+  );
+
+  const data = item.data as Record<string, unknown> | undefined;
+  const overloads = Array.isArray(data?.overloads) ? data?.overloads : [];
+  assert.strictEqual(
+    overloads.length,
+    2,
+    "Expected merged function completion to carry all overload signatures."
+  );
+  assert.strictEqual(
+    item.command?.command,
+    "editor.action.triggerParameterHints",
+    "Expected merged function completion to trigger parameter hints after insert."
+  );
+}
+
+function testFunctionCompletionResolveShowsSignatureName(): void {
+  const index = createCompletionIndex();
+  addSymbol(index, "UI", {
+    label: "AlignTextToFramePadding",
+    kind: CompletionItemKind.Function,
+    detail: "void AlignTextToFramePadding()"
+  });
+  addSymbol(index, "UI", {
+    label: "AlignTextToFramePadding",
+    kind: CompletionItemKind.Function,
+    detail: "void AlignTextToFramePadding(float offset)"
+  });
+
+  const compact = collectCompletionItems(index, "UI").find(
+    (item) =>
+      item.kind === CompletionItemKind.Function &&
+      item.label === "AlignTextToFramePadding"
+  );
+  assert.ok(compact, "Expected compact function completion item.");
+  assert.strictEqual(
+    compact?.detail,
+    "void (+1 overload)",
+    "Expected compact completion detail to stay concise."
+  );
+
+  const resolved = resolveCompletionItemDetails(compact!);
+  assert.ok(
+    (resolved.detail ?? "").includes("AlignTextToFramePadding("),
+    "Expected resolved completion detail to include full function signature with name."
   );
 }
 
@@ -2438,6 +3002,101 @@ async function testMissingIncludeDiagnosticSeverity(): Promise<void> {
   );
 }
 
+async function testCompletionIndexGameProfileSelection(): Promise<void> {
+  const baseUserFolder = await fs.mkdtemp(path.join(os.tmpdir(), "openplanet-ls-symbol-games-"));
+  try {
+    await fs.mkdir(path.join(baseUserFolder, "OpenplanetNext"), { recursive: true });
+    await fs.mkdir(path.join(baseUserFolder, "OpenplanetTurbo"), { recursive: true });
+    await fs.mkdir(path.join(baseUserFolder, "Openplanet4"), { recursive: true });
+
+    await writeCoreJsonWithGlobalFunction(
+      path.join(baseUserFolder, "OpenplanetNext", "OpenplanetCore.json"),
+      "NextOnlyFunction"
+    );
+    await writeCoreJsonWithGlobalFunction(
+      path.join(baseUserFolder, "OpenplanetTurbo", "OpenplanetCore.json"),
+      "TurboOnlyFunction"
+    );
+    await writeCoreJsonWithGlobalFunction(
+      path.join(baseUserFolder, "Openplanet4", "OpenplanetCore.json"),
+      "Openplanet4OnlyFunction"
+    );
+
+    const nextOnlySettings = createDefaultSettings();
+    nextOnlySettings.symbols.baseUserFolderPath = baseUserFolder;
+    nextOnlySettings.symbols.enableGameJson = false;
+    nextOnlySettings.symbols.enableHeader = false;
+    nextOnlySettings.symbols.trackmania2020.enabled = true;
+    nextOnlySettings.symbols.turbo.enabled = false;
+    nextOnlySettings.symbols.openplanet4.enabled = false;
+
+    const nextOnlyIndex = await buildCompletionIndex(nextOnlySettings, createNoopLogger());
+    assert.ok(
+      nextOnlyIndex.coreGlobalFunctionNames.has("NextOnlyFunction"),
+      "Expected Trackmania 2020 profile to load OpenplanetNext core symbols."
+    );
+    assert.ok(
+      !nextOnlyIndex.coreGlobalFunctionNames.has("TurboOnlyFunction"),
+      "Expected disabled Turbo profile to skip OpenplanetTurbo core symbols."
+    );
+    assert.ok(
+      !nextOnlyIndex.coreGlobalFunctionNames.has("Openplanet4OnlyFunction"),
+      "Expected disabled Openplanet4 profile to skip Openplanet4 core symbols."
+    );
+
+    const allProfilesSettings = createDefaultSettings();
+    allProfilesSettings.symbols.baseUserFolderPath = baseUserFolder;
+    allProfilesSettings.symbols.enableGameJson = false;
+    allProfilesSettings.symbols.enableHeader = false;
+    allProfilesSettings.symbols.trackmania2020.enabled = true;
+    allProfilesSettings.symbols.turbo.enabled = true;
+    allProfilesSettings.symbols.openplanet4.enabled = true;
+
+    const allProfilesIndex = await buildCompletionIndex(allProfilesSettings, createNoopLogger());
+    assert.ok(
+      allProfilesIndex.coreGlobalFunctionNames.has("NextOnlyFunction"),
+      "Expected OpenplanetNext symbols to remain loaded when multiple profiles are enabled."
+    );
+    assert.ok(
+      allProfilesIndex.coreGlobalFunctionNames.has("TurboOnlyFunction"),
+      "Expected Turbo profile enablement to load OpenplanetTurbo core symbols."
+    );
+    assert.ok(
+      allProfilesIndex.coreGlobalFunctionNames.has("Openplanet4OnlyFunction"),
+      "Expected Openplanet4 profile enablement to load Openplanet4 core symbols."
+    );
+  } finally {
+    await fs.rm(baseUserFolder, { recursive: true, force: true });
+  }
+}
+
+async function testCompletionIndexGameProfilePathOverrides(): Promise<void> {
+  const baseUserFolder = await fs.mkdtemp(
+    path.join(os.tmpdir(), "openplanet-ls-symbol-overrides-")
+  );
+  try {
+    const customCorePath = path.join(baseUserFolder, "custom-core.json");
+    await writeCoreJsonWithGlobalFunction(customCorePath, "TurboOverrideFunction");
+
+    const settings = createDefaultSettings();
+    settings.symbols.baseUserFolderPath = baseUserFolder;
+    settings.symbols.enableGameJson = false;
+    settings.symbols.enableHeader = false;
+    settings.symbols.trackmania2020.enabled = false;
+    settings.symbols.turbo.enabled = true;
+    settings.symbols.openplanet4.enabled = false;
+    settings.symbols.turbo.openplanetCoreJsonPath = customCorePath;
+
+    const index = await buildCompletionIndex(settings, createNoopLogger());
+    assert.ok(
+      index.coreGlobalFunctionNames.has("TurboOverrideFunction"),
+      "Expected turbo.openplanetCoreJsonPath override to be used for core symbol loading."
+    );
+  } finally {
+    await fs.rm(baseUserFolder, { recursive: true, force: true });
+  }
+}
+
 async function testWorkspaceAnalysisIndexSkipsOpenDocuments(): Promise<void> {
   const workspaceRoot = await fs.mkdtemp(
     path.join(os.tmpdir(), "openplanet-ls-workspace-")
@@ -2665,6 +3324,39 @@ function decodeSemanticTokens(data: number[]): Array<{
   }
 
   return decoded;
+}
+
+function createNoopLogger(): {
+  info: (...args: unknown[]) => void;
+  warn: (...args: unknown[]) => void;
+  error: (...args: unknown[]) => void;
+} {
+  return {
+    info: () => {},
+    warn: () => {},
+    error: () => {}
+  };
+}
+
+async function writeCoreJsonWithGlobalFunction(
+  filePath: string,
+  functionName: string
+): Promise<void> {
+  const payload = {
+    functions: [
+      {
+        name: functionName,
+        ns: "",
+        decl: `void ${functionName}()`,
+        desc: `${functionName} docs`
+      }
+    ],
+    props: [],
+    funcdefs: [],
+    enums: [],
+    classes: []
+  };
+  await fs.writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
 function hoverToText(hover: NonNullable<ReturnType<typeof getHoverAtPosition>>): string {

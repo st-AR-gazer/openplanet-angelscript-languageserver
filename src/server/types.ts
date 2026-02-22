@@ -6,6 +6,17 @@ export interface CompletionSettings {
   maxItems: number;
 }
 
+export interface InlayHintSettings {
+  enable: boolean;
+  parameterHintsForConstants: boolean;
+  parameterHintsForComplexExpressions: boolean;
+  parameterReferenceHints: boolean;
+  parameterHintsForSingleParameterFunctions: boolean;
+  typeHintsForAutos: boolean;
+  parameterHintsIgnoredParameterNames: string[];
+  parameterHintsIgnoredFunctionNames: string[];
+}
+
 export type SemanticTokenMode = "minimal" | "balanced";
 
 export interface SemanticTokenSettings {
@@ -66,6 +77,7 @@ export interface OpenplanetLanguageServerSettings {
   dependencies: DependencySettings;
   diagnostics: DiagnosticSettings;
   completion: CompletionSettings;
+  inlayHints: InlayHintSettings;
   semanticTokens: SemanticTokenSettings;
   symbols: SymbolSettings;
 }
@@ -73,6 +85,7 @@ export interface OpenplanetLanguageServerSettings {
 export interface CompletionBucket {
   items: CompletionItem[];
   seen: Set<string>;
+  functionByLabel: Map<string, CompletionItem>;
 }
 
 export type TypeMemberKind = "property" | "method";

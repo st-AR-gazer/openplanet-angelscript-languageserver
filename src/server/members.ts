@@ -290,6 +290,28 @@ export function registerCoreClassTypeInfo(
   });
 }
 
+export function registerNamedTypeInfo(
+  index: CompletionIndex,
+  typeFullName: string
+): void {
+  const splitIndex = typeFullName.lastIndexOf("::");
+  const namespaceName = splitIndex >= 0 ? typeFullName.slice(0, splitIndex) : "";
+  const shortName = splitIndex >= 0 ? typeFullName.slice(splitIndex + 2) : typeFullName;
+
+  registerTypeShortName(index, shortName, typeFullName);
+
+  if (index.typeInfoByFullName.has(typeFullName)) {
+    return;
+  }
+
+  index.typeInfoByFullName.set(typeFullName, {
+    fullName: typeFullName,
+    shortName,
+    namespace: namespaceName,
+    members: []
+  });
+}
+
 function formatCoreArgs(value: unknown): string {
   const parts: string[] = [];
   for (const argRecord of toObjectArray(value)) {

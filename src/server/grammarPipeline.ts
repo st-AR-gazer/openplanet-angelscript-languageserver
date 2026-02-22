@@ -1,4 +1,5 @@
 import { isLanguageKeyword, normalizeTypeText } from "./language";
+import { angelScriptKeywordLikeTokens } from "./angelScriptTokenTables.generated";
 
 export type GrammarTokenKind =
   | "identifier"
@@ -31,13 +32,17 @@ export interface GrammarProgramNode {
 
 export type GrammarDeclarationNode =
   | GrammarNamespaceDeclarationNode
+  | GrammarUsingDeclarationNode
   | GrammarTypeDeclarationNode
   | GrammarFunctionDeclarationNode
+  | GrammarCallableDeclarationNode
   | GrammarStatementNode;
 
 export interface GrammarNamespaceDeclarationNode {
   kind: "namespace";
   name: string;
+  nameStart: number;
+  nameEnd: number;
   body: GrammarDeclarationNode[];
   start: number;
   end: number;
@@ -49,6 +54,8 @@ export interface GrammarTypeDeclarationNode {
   kind: "type";
   typeKind: GrammarTypeKind;
   name: string;
+  nameStart: number;
+  nameEnd: number;
   body: GrammarDeclarationNode[];
   start: number;
   end: number;
@@ -70,6 +77,34 @@ export interface GrammarFunctionDeclarationNode {
   body?: GrammarBlockStatementNode;
 }
 
+export type GrammarCallableDeclarationKind = "funcdef" | "import";
+
+export interface GrammarCallableDeclarationNode {
+  kind: "callable-declaration";
+  declarationKind: GrammarCallableDeclarationKind;
+  name: string;
+  nameStart: number;
+  nameEnd: number;
+  openParen: number;
+  closeParen: number;
+  returnTypeText: string;
+  parameters: GrammarFunctionParameterNode[];
+  start: number;
+  end: number;
+  moduleName?: string;
+  moduleNameStart?: number;
+  moduleNameEnd?: number;
+}
+
+export interface GrammarUsingDeclarationNode {
+  kind: "using";
+  namespacePath: string;
+  namespaceStart: number;
+  namespaceEnd: number;
+  start: number;
+  end: number;
+}
+
 export type GrammarStatementNode =
   | GrammarBlockStatementNode
   | GrammarControlStatementNode
@@ -80,6 +115,11 @@ export interface GrammarFunctionParameterNode {
   name: string;
   typeText: string;
   optional: boolean;
+  modifier?: "in" | "out" | "inout";
+  variadic: boolean;
+  defaultValueText?: string;
+  defaultValueStart?: number;
+  defaultValueEnd?: number;
   start: number;
   end: number;
   nameStart: number;
@@ -187,74 +227,8 @@ const twoCharSymbols = new Set<string>([
 ]);
 
 const keywords = new Set<string>([
-  "if",
-  "else",
-  "for",
-  "foreach",
-  "while",
-  "do",
-  "switch",
-  "case",
-  "default",
-  "break",
-  "continue",
-  "return",
-  "class",
-  "interface",
-  "enum",
-  "namespace",
-  "funcdef",
-  "typedef",
-  "using",
-  "import",
-  "from",
-  "in",
-  "out",
-  "inout",
-  "is",
-  "not",
-  "and",
-  "or",
-  "xor",
-  "cast",
-  "mixin",
-  "try",
-  "catch",
-  "throw",
-  "const",
-  "private",
-  "protected",
-  "shared",
-  "override",
-  "external",
-  "final",
-  "explicit",
-  "abstract",
-  "delete",
-  "this",
-  "super",
-  "property",
-  "get",
-  "set",
-  "function",
-  "true",
-  "false",
-  "null",
-  "void",
-  "bool",
-  "int",
-  "int8",
-  "int16",
-  "int32",
-  "int64",
-  "uint",
-  "uint8",
-  "uint16",
-  "uint32",
-  "uint64",
-  "float",
-  "double",
-  "auto"
+  ...angelScriptKeywordLikeTokens,
+  "throw"
 ]);
 
 const invalidFunctionNameKeywords = new Set<string>([
@@ -269,8 +243,7 @@ const invalidFunctionNameKeywords = new Set<string>([
   "break",
   "continue",
   "else",
-  "catch",
-  "throw"
+  "catch"
 ]);
 
 const invalidTypePrefixKeywords = new Set<string>([
@@ -360,11 +333,22 @@ class GrammarParser {
       return this.parseNamespaceDeclaration();
     }
 
+    if (token.kind === "keyword" && token.text === "using") {
+      return this.parseUsingDeclaration();
+    }
+
     if (
       token.kind === "keyword" &&
       (token.text === "class" || token.text === "interface" || token.text === "enum")
     ) {
       return this.parseTypeDeclaration();
+    }
+
+    if (token.kind === "keyword" && (token.text === "funcdef" || token.text === "import")) {
+      const callableDeclaration = this.parseCallableDeclaration(token.text);
+      if (callableDeclaration) {
+        return callableDeclaration;
+      }
     }
 
     const functionHeader = this.peekFunctionHeader();
@@ -379,16 +363,73 @@ class GrammarParser {
     return this.parseSimpleStatement(true);
   }
 
+  private parseUsingDeclaration(): GrammarUsingDeclarationNode {
+    const usingToken = this.current();
+    this.advance();
+
+    const namespaceKeyword = this.current();
+    if (!(namespaceKeyword.kind === "keyword" && namespaceKeyword.text === "namespace")) {
+      this.reportError(
+        'Expected "namespace" after "using".',
+        namespaceKeyword.start,
+        namespaceKeyword.end
+      );
+    } else {
+      this.advance();
+    }
+
+    const pathTokens: GrammarToken[] = [];
+    let namespaceStart = this.current().start;
+    let namespaceEnd = this.current().end;
+
+    while (!this.isAtEnd()) {
+      const token = this.current();
+      if (token.kind === "identifier" || token.kind === "keyword") {
+        pathTokens.push(token);
+        namespaceStart = Math.min(namespaceStart, token.start);
+        namespaceEnd = Math.max(namespaceEnd, token.end);
+        this.advance();
+        if (this.checkSymbol("::")) {
+          this.advance();
+          continue;
+        }
+      }
+      break;
+    }
+
+    if (pathTokens.length === 0) {
+      this.reportError(
+        'Expected namespace path after "using namespace".',
+        namespaceKeyword.start,
+        namespaceKeyword.end
+      );
+    }
+
+    const terminator = this.expectSymbol(";", 'Expected ";" after using namespace declaration.');
+    return {
+      kind: "using",
+      namespacePath: pathTokens.map((token) => token.text).join("::"),
+      namespaceStart,
+      namespaceEnd,
+      start: usingToken.start,
+      end: terminator.end
+    };
+  }
+
   private parseNamespaceDeclaration(): GrammarNamespaceDeclarationNode {
     const startToken = this.current();
     this.advance();
     const nameToken = this.current();
+    const hasNameToken =
+      nameToken.kind === "identifier" || nameToken.kind === "keyword";
     const name =
-      nameToken.kind === "identifier" || nameToken.kind === "keyword"
+      hasNameToken
         ? nameToken.text
         : "<anonymous>";
+    const nameStart = hasNameToken ? nameToken.start : startToken.start;
+    const nameEnd = hasNameToken ? nameToken.end : startToken.end;
 
-    if (nameToken.kind === "identifier" || nameToken.kind === "keyword") {
+    if (hasNameToken) {
       this.advance();
     } else {
       this.reportError(
@@ -407,6 +448,8 @@ class GrammarParser {
       return {
         kind: "namespace",
         name,
+        nameStart,
+        nameEnd,
         body: [],
         start: startToken.start,
         end: nameToken.end
@@ -432,6 +475,8 @@ class GrammarParser {
     return {
       kind: "namespace",
       name,
+      nameStart,
+      nameEnd,
       body: declarations,
       start: startToken.start,
       end: endToken.end
@@ -444,11 +489,15 @@ class GrammarParser {
     this.advance();
 
     const nameToken = this.current();
+    const hasNameToken =
+      nameToken.kind === "identifier" || nameToken.kind === "keyword";
     const name =
-      nameToken.kind === "identifier" || nameToken.kind === "keyword"
+      hasNameToken
         ? nameToken.text
         : "<anonymous>";
-    if (nameToken.kind === "identifier" || nameToken.kind === "keyword") {
+    const nameStart = hasNameToken ? nameToken.start : keyword.start;
+    const nameEnd = hasNameToken ? nameToken.end : keyword.end;
+    if (hasNameToken) {
       this.advance();
     } else {
       this.reportError(
@@ -472,6 +521,8 @@ class GrammarParser {
         kind: "type",
         typeKind,
         name,
+        nameStart,
+        nameEnd,
         body: [],
         start: keyword.start,
         end: this.previous().end
@@ -488,6 +539,8 @@ class GrammarParser {
         kind: "type",
         typeKind,
         name,
+        nameStart,
+        nameEnd,
         body: [],
         start: keyword.start,
         end: nameToken.end
@@ -516,10 +569,141 @@ class GrammarParser {
       kind: "type",
       typeKind,
       name,
+      nameStart,
+      nameEnd,
       body,
       start: keyword.start,
       end: endToken.end
     };
+  }
+
+  private parseCallableDeclaration(
+    declarationKind: GrammarCallableDeclarationKind
+  ): GrammarCallableDeclarationNode | undefined {
+    const keywordToken = this.current();
+    const declarationStartIndex = this.index;
+    const declarationEndIndex = this.findTopLevelStatementTerminatorIndex(
+      declarationStartIndex + 1
+    );
+    if (declarationEndIndex < 0) {
+      return undefined;
+    }
+
+    const openParenIndex = this.findFirstSymbolIndex(
+      declarationStartIndex + 1,
+      declarationEndIndex,
+      "("
+    );
+    if (openParenIndex < 0) {
+      return undefined;
+    }
+
+    const closeParenIndex = this.findMatchingSymbolIndex(openParenIndex, "(", ")");
+    if (closeParenIndex < 0 || closeParenIndex >= declarationEndIndex) {
+      return undefined;
+    }
+
+    const nameTokenIndex = this.findDeclaratorNameTokenIndex(
+      declarationStartIndex + 1,
+      openParenIndex
+    );
+    if (nameTokenIndex < 0) {
+      return undefined;
+    }
+
+    const nameToken = this.tokens[nameTokenIndex];
+    if (!nameToken || nameToken.kind !== "identifier" || isLanguageKeyword(nameToken.text)) {
+      return undefined;
+    }
+
+    let returnTypeText = "";
+    if (nameTokenIndex > declarationStartIndex + 1) {
+      const returnTypeStartToken = this.tokens[declarationStartIndex + 1];
+      const returnTypeEndToken = this.tokens[nameTokenIndex - 1];
+      if (returnTypeStartToken && returnTypeEndToken) {
+        returnTypeText = normalizeTypeText(
+          this.sourceText
+            .slice(returnTypeStartToken.start, returnTypeEndToken.end)
+            .trim()
+        );
+      }
+    }
+
+    const parameters = this.parseFunctionParameters(openParenIndex + 1, closeParenIndex);
+    const terminatorToken = this.tokens[declarationEndIndex];
+    if (!terminatorToken) {
+      return undefined;
+    }
+
+    const declaration: GrammarCallableDeclarationNode = {
+      kind: "callable-declaration",
+      declarationKind,
+      name: nameToken.text,
+      nameStart: nameToken.start,
+      nameEnd: nameToken.end,
+      openParen: this.tokens[openParenIndex].start,
+      closeParen: this.tokens[closeParenIndex].start,
+      returnTypeText,
+      parameters,
+      start: keywordToken.start,
+      end: terminatorToken.end
+    };
+
+    if (declarationKind === "import") {
+      const fromTokenIndex = this.findTokenIndex(
+        closeParenIndex + 1,
+        declarationEndIndex,
+        (token) => token.text === "from"
+      );
+      if (fromTokenIndex < 0) {
+        this.reportError(
+          'Expected "from" in import declaration.',
+          keywordToken.start,
+          terminatorToken.end
+        );
+      }
+      const explicitModuleToken =
+        fromTokenIndex >= 0 ? this.tokens[fromTokenIndex + 1] : undefined;
+      if (!explicitModuleToken || explicitModuleToken.kind !== "string") {
+        const anchor = fromTokenIndex >= 0 ? this.tokens[fromTokenIndex] : keywordToken;
+        this.reportError(
+          'Expected import module string after "from".',
+          anchor.start,
+          anchor.end
+        );
+      }
+
+      for (let i = closeParenIndex + 1; i < declarationEndIndex; i += 1) {
+        const token = this.tokens[i];
+        if (!(token && token.text === "from")) {
+          continue;
+        }
+
+        const moduleToken = this.tokens[i + 1];
+        if (!moduleToken || moduleToken.kind !== "string") {
+          break;
+        }
+
+        const quoteLength =
+          moduleToken.text.length >= 2 &&
+          ((moduleToken.text.startsWith("\"") && moduleToken.text.endsWith("\"")) ||
+            (moduleToken.text.startsWith("'") && moduleToken.text.endsWith("'")))
+            ? 1
+            : 0;
+        const moduleName =
+          quoteLength > 0
+            ? moduleToken.text.slice(1, -1)
+            : moduleToken.text;
+
+        declaration.moduleName = moduleName;
+        declaration.moduleNameStart = moduleToken.start + quoteLength;
+        declaration.moduleNameEnd = moduleToken.end - quoteLength;
+        break;
+      }
+    }
+
+    this.index = declarationEndIndex + 1;
+    return declaration;
   }
 
   private parseFunctionDeclaration(header: FunctionHeaderInfo): GrammarFunctionDeclarationNode {
@@ -916,10 +1100,10 @@ class GrammarParser {
     }
 
     const nameToken = this.tokens[nameTokenIndex];
-    if (!nameToken || nameToken.kind !== "identifier") {
-      return undefined;
-    }
-    if (isLanguageKeyword(nameToken.text)) {
+    if (
+      !nameToken ||
+      (nameToken.kind !== "identifier" && nameToken.kind !== "keyword")
+    ) {
       return undefined;
     }
 
@@ -938,6 +1122,16 @@ class GrammarParser {
     const firstTypeToken = this.tokens[typeTokenIndices[0]];
     const lastTypeToken = this.tokens[typeTokenIndices[typeTokenIndices.length - 1]];
     if (!firstTypeToken || !lastTypeToken) {
+      return undefined;
+    }
+
+    const normalizedTypeText = normalizeTypeText(
+      this.sourceText.slice(firstTypeToken.start, lastTypeToken.end)
+    );
+    if (!normalizedTypeText || normalizedTypeText.endsWith("::")) {
+      return undefined;
+    }
+    if (!/[A-Za-z_]/.test(normalizedTypeText)) {
       return undefined;
     }
 
@@ -964,7 +1158,7 @@ class GrammarParser {
     }
 
     const token = this.tokens[nameTokenIndex];
-    if (!token || token.kind !== "identifier" || isLanguageKeyword(token.text)) {
+    if (!token || (token.kind !== "identifier" && token.kind !== "keyword")) {
       return undefined;
     }
 
@@ -978,6 +1172,9 @@ class GrammarParser {
   }
 
   private findDeclaratorNameTokenIndex(startIndex: number, endExclusive: number): number {
+    const hasInitializer =
+      this.findTopLevelEqualsTokenIndex(startIndex, endExclusive) >= 0;
+    let beforeInitializer = !hasInitializer;
     let parenDepth = 0;
     let bracketDepth = 0;
     let braceDepth = 0;
@@ -1010,8 +1207,16 @@ class GrammarParser {
           angleDepth += 1;
           continue;
         }
+        if (token.text === ">>") {
+          angleDepth += 2;
+          continue;
+        }
         if (token.text === "<") {
           angleDepth = Math.max(0, angleDepth - 1);
+          continue;
+        }
+        if (token.text === "<<") {
+          angleDepth = Math.max(0, angleDepth - 2);
           continue;
         }
         if (token.text === "}") {
@@ -1028,11 +1233,187 @@ class GrammarParser {
         continue;
       }
 
-      if (token.kind === "identifier") {
+      if (!beforeInitializer) {
+        if (token.kind === "symbol" && token.text === "=") {
+          beforeInitializer = true;
+        }
+        continue;
+      }
+
+      if (token.kind === "identifier" || token.kind === "keyword") {
         return i;
       }
     }
 
+    return -1;
+  }
+
+  private findTopLevelStatementTerminatorIndex(startIndex: number): number {
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    let braceDepth = 0;
+    let angleDepth = 0;
+
+    for (let i = startIndex; i < this.tokens.length; i += 1) {
+      const token = this.tokens[i];
+      if (!token) {
+        continue;
+      }
+      if (token.kind === "eof") {
+        return -1;
+      }
+      if (token.kind !== "symbol") {
+        continue;
+      }
+
+      if (
+        token.text === ";" &&
+        parenDepth === 0 &&
+        bracketDepth === 0 &&
+        braceDepth === 0 &&
+        angleDepth === 0
+      ) {
+        return i;
+      }
+
+      if (token.text === "(") {
+        parenDepth += 1;
+        continue;
+      }
+      if (token.text === ")") {
+        parenDepth = Math.max(0, parenDepth - 1);
+        continue;
+      }
+      if (token.text === "[") {
+        bracketDepth += 1;
+        continue;
+      }
+      if (token.text === "]") {
+        bracketDepth = Math.max(0, bracketDepth - 1);
+        continue;
+      }
+      if (token.text === "{") {
+        braceDepth += 1;
+        continue;
+      }
+      if (token.text === "}") {
+        if (
+          parenDepth === 0 &&
+          bracketDepth === 0 &&
+          braceDepth === 0 &&
+          angleDepth === 0
+        ) {
+          return -1;
+        }
+        braceDepth = Math.max(0, braceDepth - 1);
+        continue;
+      }
+      if (token.text === "<") {
+        angleDepth += 1;
+        continue;
+      }
+      if (token.text === ">") {
+        angleDepth = Math.max(0, angleDepth - 1);
+        continue;
+      }
+      if (token.text === "<<") {
+        angleDepth += 2;
+        continue;
+      }
+      if (token.text === ">>") {
+        angleDepth = Math.max(0, angleDepth - 2);
+        continue;
+      }
+    }
+
+    return -1;
+  }
+
+  private findFirstSymbolIndex(
+    startIndex: number,
+    endExclusive: number,
+    symbol: string
+  ): number {
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    let braceDepth = 0;
+    let angleDepth = 0;
+
+    for (let i = startIndex; i < endExclusive; i += 1) {
+      const token = this.tokens[i];
+      if (!token || token.kind !== "symbol") {
+        continue;
+      }
+
+      if (
+        token.text === symbol &&
+        parenDepth === 0 &&
+        bracketDepth === 0 &&
+        braceDepth === 0 &&
+        angleDepth === 0
+      ) {
+        return i;
+      }
+
+      if (token.text === "(") {
+        parenDepth += 1;
+        continue;
+      }
+      if (token.text === ")") {
+        parenDepth = Math.max(0, parenDepth - 1);
+        continue;
+      }
+      if (token.text === "[") {
+        bracketDepth += 1;
+        continue;
+      }
+      if (token.text === "]") {
+        bracketDepth = Math.max(0, bracketDepth - 1);
+        continue;
+      }
+      if (token.text === "{") {
+        braceDepth += 1;
+        continue;
+      }
+      if (token.text === "}") {
+        braceDepth = Math.max(0, braceDepth - 1);
+        continue;
+      }
+      if (token.text === "<") {
+        angleDepth += 1;
+        continue;
+      }
+      if (token.text === ">") {
+        angleDepth = Math.max(0, angleDepth - 1);
+        continue;
+      }
+      if (token.text === "<<") {
+        angleDepth += 2;
+        continue;
+      }
+      if (token.text === ">>") {
+        angleDepth = Math.max(0, angleDepth - 2);
+        continue;
+      }
+    }
+
+    return -1;
+  }
+
+  private findTokenIndex(
+    startIndex: number,
+    endExclusive: number,
+    predicate: (token: GrammarToken) => boolean
+  ): number {
+    for (let i = startIndex; i < endExclusive; i += 1) {
+      const token = this.tokens[i];
+      if (!token || token.kind === "eof") {
+        continue;
+      }
+      if (predicate(token)) {
+        return i;
+      }
+    }
     return -1;
   }
 
@@ -1052,6 +1433,7 @@ class GrammarParser {
       return false;
     }
 
+    let hasTypeNameToken = false;
     for (const index of indices) {
       const token = this.tokens[index];
       if (!token) {
@@ -1059,11 +1441,15 @@ class GrammarParser {
       }
 
       if (token.kind === "identifier") {
+        hasTypeNameToken = true;
         continue;
       }
       if (token.kind === "keyword") {
         if (invalidTypePrefixKeywords.has(token.text)) {
           return false;
+        }
+        if (!typeOnlyKeywords.has(token.text)) {
+          hasTypeNameToken = true;
         }
         continue;
       }
@@ -1072,6 +1458,8 @@ class GrammarParser {
           token.text === "::" ||
           token.text === "<" ||
           token.text === ">" ||
+          token.text === "<<" ||
+          token.text === ">>" ||
           token.text === "[" ||
           token.text === "]" ||
           token.text === "&" ||
@@ -1086,7 +1474,7 @@ class GrammarParser {
       return false;
     }
 
-    return true;
+    return hasTypeNameToken;
   }
 
   private splitTopLevelByComma(
@@ -1134,8 +1522,16 @@ class GrammarParser {
         angleDepth += 1;
         continue;
       }
+      if (token.text === "<<") {
+        angleDepth += 2;
+        continue;
+      }
       if (token.text === ">") {
         angleDepth = Math.max(0, angleDepth - 1);
+        continue;
+      }
+      if (token.text === ">>") {
+        angleDepth = Math.max(0, angleDepth - 2);
         continue;
       }
 
@@ -1272,11 +1668,15 @@ class GrammarParser {
     }
 
     const nameToken = this.tokens[nameTokenIndex];
-    if (!nameToken || nameToken.kind !== "identifier") {
+    if (
+      !nameToken ||
+      (nameToken.kind !== "identifier" && nameToken.kind !== "keyword")
+    ) {
       return undefined;
     }
 
-    if (invalidFunctionNameKeywords.has(nameToken.text)) {
+    const hasExplicitReturnType = nameTokenIndex > i;
+    if (invalidFunctionNameKeywords.has(nameToken.text) && !hasExplicitReturnType) {
       return undefined;
     }
 
@@ -1353,29 +1753,54 @@ class GrammarParser {
       }
 
       const nameToken = this.tokens[nameTokenIndex];
-      if (!nameToken || nameToken.kind !== "identifier" || isLanguageKeyword(nameToken.text)) {
+      if (
+        !nameToken ||
+        (nameToken.kind !== "identifier" && nameToken.kind !== "keyword")
+      ) {
         continue;
       }
 
       const typeStartToken = this.tokens[segment.start];
       const typeEndToken = this.tokens[nameTokenIndex - 1];
-      const typeText =
+      const rawTypeText =
         typeStartToken && typeEndToken
-          ? normalizeTypeText(
-              this.sourceText.slice(typeStartToken.start, typeEndToken.end)
-            )
+          ? this.sourceText.slice(typeStartToken.start, typeEndToken.end).trim()
           : "";
-      if (!typeText || typeText === "void") {
+      const normalizedTypeText = normalizeTypeText(rawTypeText);
+      if (!normalizedTypeText || normalizedTypeText === "void") {
         continue;
       }
 
-      const optional = this.hasTopLevelEqualsToken(segment.start, segment.end);
+      const topLevelEqualsTokenIndex = this.findTopLevelEqualsTokenIndex(
+        segment.start,
+        segment.end
+      );
+      const optional = topLevelEqualsTokenIndex >= 0;
+      let defaultValueText: string | undefined;
+      let defaultValueStart: number | undefined;
+      let defaultValueEnd: number | undefined;
+      if (topLevelEqualsTokenIndex >= 0 && topLevelEqualsTokenIndex + 1 < segment.end) {
+        const startToken = this.tokens[topLevelEqualsTokenIndex + 1];
+        const endToken = this.tokens[segment.end - 1];
+        if (startToken && endToken) {
+          defaultValueText = this.sourceText.slice(startToken.start, endToken.end).trim();
+          defaultValueStart = startToken.start;
+          defaultValueEnd = endToken.end;
+        }
+      }
+
+      const variadic = this.hasVariadicMarker(segment.start, segment.end);
       const segmentStart = this.tokens[segment.start].start;
       const segmentEnd = this.tokens[segment.end - 1].end;
       parameters.push({
         name: nameToken.text,
-        typeText,
+        typeText: rawTypeText,
         optional,
+        modifier: parseParameterModifier(rawTypeText),
+        variadic,
+        defaultValueText: defaultValueText && defaultValueText.length > 0 ? defaultValueText : undefined,
+        defaultValueStart,
+        defaultValueEnd,
         start: segmentStart,
         end: segmentEnd,
         nameStart: nameToken.start,
@@ -1386,7 +1811,7 @@ class GrammarParser {
     return parameters;
   }
 
-  private hasTopLevelEqualsToken(startIndex: number, endExclusive: number): boolean {
+  private findTopLevelEqualsTokenIndex(startIndex: number, endExclusive: number): number {
     let parenDepth = 0;
     let bracketDepth = 0;
     let braceDepth = 0;
@@ -1425,8 +1850,16 @@ class GrammarParser {
         angleDepth += 1;
         continue;
       }
+      if (token.text === "<<") {
+        angleDepth += 2;
+        continue;
+      }
       if (token.text === ">") {
         angleDepth = Math.max(0, angleDepth - 1);
+        continue;
+      }
+      if (token.text === ">>") {
+        angleDepth = Math.max(0, angleDepth - 2);
         continue;
       }
 
@@ -1437,10 +1870,23 @@ class GrammarParser {
         braceDepth === 0 &&
         angleDepth === 0
       ) {
-        return true;
+        return i;
       }
     }
 
+    return -1;
+  }
+
+  private hasVariadicMarker(startIndex: number, endExclusive: number): boolean {
+    for (let i = startIndex; i < endExclusive; i += 1) {
+      const token = this.tokens[i];
+      if (!token || token.kind !== "symbol") {
+        continue;
+      }
+      if (token.text === "...") {
+        return true;
+      }
+    }
     return false;
   }
 
@@ -1469,9 +1915,12 @@ class GrammarParser {
       if (
         token.kind === "keyword" &&
         (token.text === "namespace" ||
+          token.text === "using" ||
           token.text === "class" ||
           token.text === "interface" ||
-          token.text === "enum")
+          token.text === "enum" ||
+          token.text === "funcdef" ||
+          token.text === "import")
       ) {
         return;
       }
@@ -1582,8 +2031,25 @@ interface FunctionHeaderInfo {
   afterCloseParenIndex: number;
 }
 
+function parseParameterModifier(
+  rawTypeText: string
+): "in" | "out" | "inout" | undefined {
+  const matches = rawTypeText.match(/\b(?:inout|in|out)\b/g);
+  if (!matches || matches.length === 0) {
+    return undefined;
+  }
+  if (matches.includes("inout")) {
+    return "inout";
+  }
+  if (matches.includes("out")) {
+    return "out";
+  }
+  return "in";
+}
+
 export function tokenizeGrammarText(text: string): GrammarToken[] {
   const tokens: GrammarToken[] = [];
+  const threeCharSymbols = new Set<string>(["...", ">>>"]);
   let i = 0;
 
   while (i < text.length) {
@@ -1691,6 +2157,19 @@ export function tokenizeGrammarText(text: string): GrammarToken[] {
         start,
         end: i
       });
+      continue;
+    }
+
+    const triple =
+      i + 2 < text.length ? `${ch}${next}${text[i + 2]}` : "";
+    if (threeCharSymbols.has(triple)) {
+      tokens.push({
+        kind: "symbol",
+        text: triple,
+        start: i,
+        end: i + 3
+      });
+      i += 3;
       continue;
     }
 

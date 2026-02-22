@@ -13,7 +13,11 @@ import type {
   SymbolSettings
 } from "./types";
 import { addSymbol, createCompletionIndex, registerNamespacePath } from "./completions";
-import { registerCoreClassTypeInfo, registerGameTypeInfo } from "./members";
+import {
+  registerCoreClassTypeInfo,
+  registerGameTypeInfo,
+  registerNamedTypeInfo
+} from "./members";
 import {
   getBaseUserFolderPath,
   readString,
@@ -192,6 +196,11 @@ async function loadCoreSymbolsFromJson(
     }
 
     const namespaceName = readString(entry.ns);
+    const fullName =
+      namespaceName && namespaceName.length > 0 ? `${namespaceName}::${name}` : name;
+
+    registerNamedTypeInfo(index, fullName);
+
     if (!namespaceName || namespaceName.length === 0) {
       index.coreGlobalFuncdefNames.add(name);
     }
@@ -210,6 +219,14 @@ async function loadCoreSymbolsFromJson(
     }
 
     const namespaceName = readString(entry.ns);
+    const enumScopeName =
+      namespaceName && namespaceName.length > 0
+        ? `${namespaceName}::${enumName}`
+        : enumName;
+
+    registerNamedTypeInfo(index, enumScopeName);
+    registerNamespacePath(index, enumScopeName);
+
     if (!namespaceName || namespaceName.length === 0) {
       index.coreGlobalValueNames.add(enumName);
     }
@@ -225,7 +242,8 @@ async function loadCoreSymbolsFromJson(
       if (!namespaceName || namespaceName.length === 0) {
         index.coreGlobalValueNames.add(valueName);
       }
-      addSymbol(index, namespaceName, {
+
+      addSymbol(index, enumScopeName, {
         label: valueName,
         kind: CompletionItemKind.EnumMember,
         detail: `Enum value (${enumName})`

@@ -377,11 +377,7 @@ class DocumentStructureParser {
 
     const { name, nameStart, nameEnd, nameTokenIndex } = nameTokenInfo;
     const baseFunctionName = name.startsWith("~") ? name.slice(1) : name;
-    if (
-      !baseFunctionName ||
-      invalidFunctionNames.has(baseFunctionName) ||
-      isLanguageKeyword(baseFunctionName)
-    ) {
+    if (!baseFunctionName || invalidFunctionNames.has(baseFunctionName)) {
       return undefined;
     }
 

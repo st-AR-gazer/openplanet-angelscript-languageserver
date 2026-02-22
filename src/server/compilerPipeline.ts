@@ -4,6 +4,10 @@ import {
   getResolvedMembersForType,
   tryResolveTypeFullNameFromTypeString
 } from "./members";
+import {
+  angelScriptKeywordLikeTokens,
+  angelScriptReservedKeywords
+} from "./angelScriptTokenTables.generated";
 import type { CompletionIndex } from "./types";
 
 export type TypeCompatibility = "compatible" | "incompatible" | "unknown";
@@ -34,6 +38,7 @@ export interface ExpressionInferenceContext {
   localVariableTypes: Map<string, string>;
   localFunctionReturnTypes: Map<string, string>;
   functionSources: ExpressionFunctionSources;
+  memberVariableTypes?: Map<string, string>;
 }
 
 export interface OverloadResolutionResult {
@@ -171,35 +176,18 @@ const expressionKeywordOperators = new Set<string>([
 
 const expressionLiteralKeywords = new Set<string>(["true", "false", "null"]);
 
-const expressionReservedKeywords = new Set<string>([
-  "if",
-  "else",
-  "for",
-  "foreach",
-  "while",
-  "do",
-  "switch",
-  "case",
-  "default",
-  "break",
-  "continue",
-  "return",
-  "namespace",
-  "class",
-  "interface",
-  "enum",
-  "funcdef",
-  "typedef",
-  "import",
-  "from",
-  "try",
-  "catch",
-  "throw"
-]);
+const expressionReservedKeywords = new Set<string>(
+  angelScriptReservedKeywords.filter(
+    (keyword) =>
+      !expressionKeywordOperators.has(keyword) && !expressionLiteralKeywords.has(keyword)
+  )
+);
 
 const expressionKeywords = new Set<string>([
+  ...angelScriptKeywordLikeTokens,
   ...expressionKeywordOperators,
-  ...expressionLiteralKeywords
+  ...expressionLiteralKeywords,
+  "throw"
 ]);
 
 const binaryOperatorByToken = new Map<string, BinaryOperatorInfo>([
@@ -217,14 +205,17 @@ const binaryOperatorByToken = new Map<string, BinaryOperatorInfo>([
   [">", { symbol: ">", precedence: 6 }],
   ["<=", { symbol: "<=", precedence: 6 }],
   [">=", { symbol: ">=", precedence: 6 }],
+  ["!is", { symbol: "!is", precedence: 6 }],
   ["<<", { symbol: "<<", precedence: 7 }],
   [">>", { symbol: ">>", precedence: 7 }],
+  [">>>", { symbol: ">>>", precedence: 7 }],
   ["+", { symbol: "+", precedence: 8 }],
   ["-", { symbol: "-", precedence: 8 }],
   ["*", { symbol: "*", precedence: 9 }],
   ["/", { symbol: "/", precedence: 9 }],
   ["%", { symbol: "%", precedence: 9 }],
-  ["^", { symbol: "^", precedence: 9 }]
+  ["^", { symbol: "^", precedence: 9 }],
+  ["**", { symbol: "**", precedence: 10 }]
 ]);
 
 const numericRank = new Map<string, number>([
@@ -238,6 +229,62 @@ const numericRank = new Map<string, number>([
   ["uint64", 4],
   ["float", 5],
   ["double", 6]
+]);
+
+const unaryOperatorMethodNames = new Map<string, string[]>([
+  ["!", ["opNot"]],
+  ["not", ["opNot"]],
+  ["~", ["opCom"]],
+  ["+", ["opPos"]],
+  ["-", ["opNeg"]]
+]);
+
+const binaryOperatorMethodNames = new Map<string, string[]>([
+  ["+", ["opAdd"]],
+  ["-", ["opSub"]],
+  ["*", ["opMul"]],
+  ["/", ["opDiv"]],
+  ["%", ["opMod"]],
+  ["&", ["opAnd"]],
+  ["|", ["opOr"]],
+  ["^", ["opXor"]],
+  ["<<", ["opShl"]],
+  [">>", ["opShr", "opUShr"]],
+  ["==", ["opEquals", "opCmp"]],
+  ["!=", ["opEquals", "opCmp"]],
+  ["<", ["opCmp"]],
+  [">", ["opCmp"]],
+  ["<=", ["opCmp"]],
+  [">=", ["opCmp"]]
+]);
+
+const assignmentOperatorMethodNames = new Map<
+  "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=",
+  string[]
+>([
+  ["=", ["opAssign"]],
+  ["+=", ["opAddAssign", "opAdd"]],
+  ["-=", ["opSubAssign", "opSub"]],
+  ["*=", ["opMulAssign", "opMul"]],
+  ["/=", ["opDivAssign", "opDiv"]],
+  ["%=", ["opModAssign", "opMod"]],
+  ["&=", ["opAndAssign", "opAnd"]],
+  ["|=", ["opOrAssign", "opOr"]],
+  ["^=", ["opXorAssign", "opXor"]],
+  ["<<=", ["opShlAssign", "opShl"]],
+  [">>=", ["opShrAssign", "opUShrAssign", "opShr", "opUShr"]]
+]);
+
+const reverseBinaryOperatorSuffix = "_r";
+
+const indexedContainerTypeNames = new Set<string>([
+  "array",
+  "mwsarray",
+  "mwstridedarray",
+  "mwfastarray",
+  "mwfastbuffer",
+  "mwnodpool",
+  "mwrefbuffer"
 ]);
 
 export function parseCallableSignature(signatureLabel: string): ParsedCallableSignature | undefined {
@@ -364,7 +411,8 @@ export function inferExpressionTypeFromText(
     return undefined;
   }
 
-  const ast = parseExpressionAst(trimmed);
+  const normalized = normalizeBangIsOperator(trimmed);
+  const ast = parseExpressionAst(normalized);
   if (!ast) {
     return inferSimpleLiteralType(trimmed);
   }
@@ -378,16 +426,47 @@ export function evaluateAssignmentOperatorCompatibility(
   leftType: string,
   rightType: string | undefined
 ): TypeCompatibility {
-  const left = parseTypeDescriptor(leftType);
-  const right = parseTypeDescriptor(rightType);
+  const left = parseTypeDescriptor(leftType, index);
+  const right = parseTypeDescriptor(rightType, index);
 
   if (!left) {
     return "unknown";
   }
 
+  if (left.isAny || right?.isAny) {
+    return "unknown";
+  }
+
   if (operator === "=") {
-    return evaluateConversion(index, left, right, new Map<string, TypeDescriptor>())
-      .status;
+    if (right?.isNull && (left.isHandle || (!left.isPrimitive && !left.isReference))) {
+      return "compatible";
+    }
+
+    const directConversion = evaluateConversion(
+      index,
+      left,
+      right,
+      new Map<string, TypeDescriptor>()
+    ).status;
+    if (directConversion === "compatible") {
+      return "compatible";
+    }
+    if (directConversion === "unknown") {
+      return "unknown";
+    }
+
+    const operatorCompatibility = evaluateOperatorMethodCompatibility(
+      index,
+      left,
+      right,
+      assignmentOperatorMethodNames.get("=") ?? [],
+      rightType
+    );
+    if (operatorCompatibility !== "unknown") {
+      return operatorCompatibility;
+    }
+
+    return "incompatible";
   }
 
   if (operator === "+=") {
@@ -397,7 +476,17 @@ export function evaluateAssignmentOperatorCompatibility(
     if (isNumericTypeName(left.normalized) && right && isNumericTypeName(right.normalized)) {
       return "compatible";
     }
-    return right ? "incompatible" : "unknown";
+    if (!right) {
+      return "unknown";
+    }
+    const operatorCompatibility = evaluateOperatorMethodCompatibility(
+      index,
+      left,
+      right,
+      assignmentOperatorMethodNames.get(operator) ?? [],
+      rightType
+    );
+    return operatorCompatibility === "unknown" ? "incompatible" : operatorCompatibility;
   }
 
   if (operator === "-=" || operator === "*=" || operator === "/=" || operator === "%=") {
@@ -405,13 +494,27 @@ export function evaluateAssignmentOperatorCompatibility(
       return "unknown";
     }
     if (!isNumericTypeName(left.normalized) || !isNumericTypeName(right.normalized)) {
-      return "incompatible";
+      const operatorCompatibility = evaluateOperatorMethodCompatibility(
+        index,
+        left,
+        right,
+        assignmentOperatorMethodNames.get(operator) ?? [],
+        rightType
+      );
+      return operatorCompatibility === "unknown" ? "incompatible" : operatorCompatibility;
     }
     if (
       operator === "%=" &&
       (!isIntegerTypeName(left.normalized) || !isIntegerTypeName(right.normalized))
     ) {
-      return "incompatible";
+      const operatorCompatibility = evaluateOperatorMethodCompatibility(
+        index,
+        left,
+        right,
+        assignmentOperatorMethodNames.get(operator) ?? [],
+        rightType
+      );
+      return operatorCompatibility === "unknown" ? "incompatible" : operatorCompatibility;
     }
     return "compatible";
   }
@@ -426,9 +529,18 @@ export function evaluateAssignmentOperatorCompatibility(
     if (!right) {
       return "unknown";
     }
-    return isIntegerTypeName(left.normalized) && isIntegerTypeName(right.normalized)
-      ? "compatible"
-      : "incompatible";
+    if (isIntegerTypeName(left.normalized) && isIntegerTypeName(right.normalized)) {
+      return "compatible";
+    }
+
+    const operatorCompatibility = evaluateOperatorMethodCompatibility(
+      index,
+      left,
+      right,
+      assignmentOperatorMethodNames.get(operator) ?? [],
+      rightType
+    );
+    return operatorCompatibility === "unknown" ? "incompatible" : operatorCompatibility;
   }
 
   return "unknown";
@@ -466,7 +578,7 @@ function scoreCallableCandidate(
       variadicUsageCount += 1;
     }
 
-    const expected = parseTypeDescriptor(parameter.typeText);
+    const expected = parseTypeDescriptor(parameter.typeText, index);
     if (!expected) {
       unknownCount += 1;
       continue;
@@ -475,7 +587,7 @@ function scoreCallableCandidate(
       specificityScore += 1;
     }
 
-    const actual = parseTypeDescriptor(argumentTypes[i]);
+    const actual = parseTypeDescriptor(argumentTypes[i], index);
     const conversion = evaluateConversion(index, expected, actual, templateBindings);
     if (conversion.status === "incompatible") {
       sawIncompatibleType = true;
@@ -573,10 +685,8 @@ function inferExpressionTypeFromNode(
       if (!objectType) {
         return undefined;
       }
-      if (isStringTypeName(objectType)) {
-        return "int";
-      }
-      return undefined;
+      const indexType = inferExpressionTypeFromNode(index, node.index, context, depth + 1);
+      return inferIndexAccessType(index, objectType, indexType);
     }
     default:
       return undefined;
@@ -619,6 +729,11 @@ function inferIdentifierType(
     return localFunctionType;
   }
 
+  const memberVariableType = context.memberVariableTypes?.get(node.name);
+  if (memberVariableType) {
+    return memberVariableType;
+  }
+
   const knownType = resolveKnownTypeName(index, node.qualifiedName);
   if (knownType) {
     return knownType;
@@ -636,6 +751,17 @@ function inferMemberAccessType(
   const objectType = inferExpressionTypeFromNode(index, node.object, context, depth + 1);
   if (!objectType) {
     return undefined;
+  }
+
+  const objectDescriptor = parseTypeDescriptor(objectType, index);
+  if (objectDescriptor && node.name === "Length") {
+    if (
+      objectDescriptor.shortBase === "string" ||
+      objectDescriptor.shortBase === "array" ||
+      objectDescriptor.shortBase === "dictionary"
+    ) {
+      return "uint";
+    }
   }
 
   const receiverTypeFullName = resolveTypeFullName(index, objectType);
@@ -662,15 +788,24 @@ function inferCallExpressionType(
   );
 
   if (node.callee.kind === "identifier") {
+    const constructorType = resolveKnownTypeName(index, node.callee.qualifiedName);
     const signatures = collectIdentifierCallSignatures(node.callee, context);
     if (signatures.length > 0) {
       const resolution = resolveBestCallableOverload(index, signatures, argumentTypes);
       if (resolution.matched && resolution.best) {
-        return resolution.resolvedReturnType ?? resolution.best.returnType;
+        const resolvedReturnType =
+          resolution.resolvedReturnType ?? resolution.best.returnType;
+        const normalizedReturnType = normalizeTypeText(resolvedReturnType).trim();
+        if (normalizedReturnType && normalizedReturnType !== "void") {
+          return normalizedReturnType;
+        }
+        if (constructorType) {
+          return constructorType;
+        }
+        return normalizedReturnType || resolvedReturnType;
       }
     }
 
-    const constructorType = resolveKnownTypeName(index, node.callee.qualifiedName);
     if (constructorType) {
       return constructorType;
     }
@@ -736,7 +871,8 @@ function inferUnaryExpressionType(
     return isNumericTypeName(operandType) ? normalizeTypeText(operandType) : undefined;
   }
 
-  return undefined;
+  const overload = resolveUnaryOperatorOverload(index, node.operator, operandType);
+  return overload?.resolvedReturnType;
 }
 
 function inferBinaryExpressionType(
@@ -756,7 +892,11 @@ function inferBinaryExpressionType(
     operator === "and" ||
     operator === "or"
   ) {
-    return "bool";
+    if (isBoolTypeName(leftType) && isBoolTypeName(rightType)) {
+      return "bool";
+    }
+    const overload = resolveBinaryOperatorOverload(index, operator, leftType, rightType);
+    return overload?.resolvedReturnType;
   }
 
   if (operator === "xor") {
@@ -766,15 +906,19 @@ function inferBinaryExpressionType(
     if (isIntegerTypeName(leftType) && isIntegerTypeName(rightType)) {
       return promoteNumericType(leftType, rightType);
     }
-    return undefined;
+    const overload = resolveBinaryOperatorOverload(index, operator, leftType, rightType);
+    return overload?.resolvedReturnType;
   }
 
   if (operator === "==" || operator === "!=") {
     const compatibilityA = evaluateTypeTextCompatibility(index, leftType, rightType);
     const compatibilityB = evaluateTypeTextCompatibility(index, rightType, leftType);
-    return compatibilityA !== "incompatible" || compatibilityB !== "incompatible"
-      ? "bool"
-      : undefined;
+    if (compatibilityA !== "incompatible" || compatibilityB !== "incompatible") {
+      return "bool";
+    }
+
+    const overload = resolveBinaryOperatorOverload(index, operator, leftType, rightType);
+    return overload?.resolvedReturnType;
   }
 
   if (
@@ -789,10 +933,14 @@ function inferBinaryExpressionType(
     if (isStringTypeName(leftType) && isStringTypeName(rightType)) {
       return "bool";
     }
-    return undefined;
+    const overload = resolveBinaryOperatorOverload(index, operator, leftType, rightType);
+    return overload?.resolvedReturnType;
   }
 
   if (operator === "is") {
+    return leftType || rightType ? "bool" : undefined;
+  }
+  if (operator === "!is") {
     return leftType || rightType ? "bool" : undefined;
   }
 
@@ -804,31 +952,36 @@ function inferBinaryExpressionType(
     if (isNumericTypeName(leftType) && isNumericTypeName(rightType)) {
       return promoteNumericType(leftType, rightType);
     }
-    return undefined;
+    const overload = resolveBinaryOperatorOverload(index, operator, leftType, rightType);
+    return overload?.resolvedReturnType;
   }
 
   if (operator === "%") {
     if (isIntegerTypeName(leftType) && isIntegerTypeName(rightType)) {
       return promoteNumericType(leftType, rightType);
     }
-    return undefined;
+    const overload = resolveBinaryOperatorOverload(index, operator, leftType, rightType);
+    return overload?.resolvedReturnType;
   }
 
   if (operator === "&" || operator === "|" || operator === "^") {
     if (isIntegerTypeName(leftType) && isIntegerTypeName(rightType)) {
       return promoteNumericType(leftType, rightType);
     }
-    return undefined;
+    const overload = resolveBinaryOperatorOverload(index, operator, leftType, rightType);
+    return overload?.resolvedReturnType;
   }
 
   if (operator === "<<" || operator === ">>") {
     if (isIntegerTypeName(leftType) && isIntegerTypeName(rightType)) {
       return normalizeTypeText(leftType || "int") || "int";
     }
-    return undefined;
+    const overload = resolveBinaryOperatorOverload(index, operator, leftType, rightType);
+    return overload?.resolvedReturnType;
   }
 
-  return undefined;
+  const overload = resolveBinaryOperatorOverload(index, operator, leftType, rightType);
+  return overload?.resolvedReturnType;
 }
 
 function inferConditionalExpressionType(
@@ -846,8 +999,8 @@ function inferConditionalExpressionType(
     return trueType;
   }
 
-  const trueDescriptor = parseTypeDescriptor(trueType);
-  const falseDescriptor = parseTypeDescriptor(falseType);
+  const trueDescriptor = parseTypeDescriptor(trueType, index);
+  const falseDescriptor = parseTypeDescriptor(falseType, index);
   if (!trueDescriptor || !falseDescriptor) {
     return undefined;
   }
@@ -927,6 +1080,241 @@ function methodMemberToSignature(
   return parseCallableSignature(label);
 }
 
+function collectMethodSignaturesByNames(
+  index: CompletionIndex,
+  receiverTypeFullName: string,
+  methodNames: string[]
+): ParsedCallableSignature[] {
+  if (methodNames.length === 0) {
+    return [];
+  }
+
+  const allowed = new Set(methodNames);
+  const signatures: ParsedCallableSignature[] = [];
+  const seen = new Set<string>();
+
+  for (const member of getResolvedMembersForType(index, receiverTypeFullName)) {
+    if (member.kind !== "method" || !allowed.has(member.name)) {
+      continue;
+    }
+
+    const signature = methodMemberToSignature(member.name, member.returnType, member.args);
+    if (!signature) {
+      continue;
+    }
+
+    const key = `${signature.name}:${signature.label}:${signature.returnType}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    signatures.push(signature);
+  }
+
+  return signatures;
+}
+
+function resolveUnaryOperatorOverload(
+  index: CompletionIndex,
+  operator: string,
+  operandType: string
+): { resolvedReturnType: string; methodName: string } | undefined {
+  const receiverTypeFullName = resolveTypeFullName(index, operandType);
+  if (!receiverTypeFullName) {
+    return undefined;
+  }
+
+  const methodNames = unaryOperatorMethodNames.get(operator);
+  if (!methodNames || methodNames.length === 0) {
+    return undefined;
+  }
+
+  const signatures = collectMethodSignaturesByNames(
+    index,
+    receiverTypeFullName,
+    methodNames
+  );
+  if (signatures.length === 0) {
+    return undefined;
+  }
+
+  const resolution = resolveBestCallableOverload(index, signatures, []);
+  if (!resolution.matched || !resolution.best) {
+    return undefined;
+  }
+
+  return {
+    resolvedReturnType: resolution.resolvedReturnType ?? resolution.best.returnType,
+    methodName: resolution.best.name
+  };
+}
+
+function resolveBinaryOperatorOverload(
+  index: CompletionIndex,
+  operator: string,
+  leftType: string | undefined,
+  rightType: string | undefined
+): { resolvedReturnType: string; methodName: string } | undefined {
+  const methodNames = binaryOperatorMethodNames.get(operator);
+  if (!methodNames || methodNames.length === 0) {
+    return undefined;
+  }
+
+  const tryResolveOnType = (
+    receiverType: string | undefined,
+    argumentType: string | undefined,
+    candidateMethodNames: string[]
+  ): { resolvedReturnType: string; methodName: string } | undefined => {
+    if (!receiverType) {
+      return undefined;
+    }
+
+    const receiverTypeFullName = resolveTypeFullName(index, receiverType);
+    if (!receiverTypeFullName) {
+      return undefined;
+    }
+
+    const signatures = collectMethodSignaturesByNames(
+      index,
+      receiverTypeFullName,
+      candidateMethodNames
+    );
+    if (signatures.length === 0) {
+      return undefined;
+    }
+
+    const resolution = resolveBestCallableOverload(index, signatures, [argumentType]);
+    if (!resolution.matched || !resolution.best) {
+      return undefined;
+    }
+
+    const comparisonOperator =
+      operator === "==" ||
+      operator === "!=" ||
+      operator === "<" ||
+      operator === ">" ||
+      operator === "<=" ||
+      operator === ">=";
+
+    const methodName = resolution.best.name;
+    if (comparisonOperator && (methodName.startsWith("opCmp") || methodName.startsWith("opEquals"))) {
+      return {
+        resolvedReturnType: "bool",
+        methodName
+      };
+    }
+
+    return {
+      resolvedReturnType: resolution.resolvedReturnType ?? resolution.best.returnType,
+      methodName
+    };
+  };
+
+  const direct = tryResolveOnType(leftType, rightType, methodNames);
+  if (direct) {
+    return direct;
+  }
+
+  const reverseMethodNames = methodNames.map(
+    (methodName) => `${methodName}${reverseBinaryOperatorSuffix}`
+  );
+  return tryResolveOnType(rightType, leftType, reverseMethodNames);
+}
+
+function inferIndexAccessType(
+  index: CompletionIndex,
+  objectType: string,
+  indexType: string | undefined
+): string | undefined {
+  if (isStringTypeName(objectType)) {
+    return "int";
+  }
+
+  const objectDescriptor = parseTypeDescriptor(objectType, index);
+  if (
+    objectDescriptor &&
+    objectDescriptor.genericArgs.length > 0 &&
+    indexedContainerTypeNames.has(objectDescriptor.shortBase)
+  ) {
+    const valueType = descriptorToTypeText(objectDescriptor.genericArgs[0]);
+    return valueType;
+  }
+
+  const receiverTypeFullName = resolveTypeFullName(index, objectType);
+  if (!receiverTypeFullName) {
+    return undefined;
+  }
+
+  const isConstReceiver = /\bconst\b/i.test(objectType);
+  const signatures = collectMethodSignaturesByNames(
+    index,
+    receiverTypeFullName,
+    isConstReceiver ? ["opIndexConst"] : ["opIndex", "opIndexConst"]
+  );
+  if (signatures.length === 0) {
+    return undefined;
+  }
+
+  const resolution = resolveBestCallableOverload(index, signatures, [indexType]);
+  if (!resolution.matched || !resolution.best) {
+    return undefined;
+  }
+
+  return resolution.resolvedReturnType ?? resolution.best.returnType;
+}
+
+function evaluateOperatorMethodCompatibility(
+  index: CompletionIndex,
+  left: TypeDescriptor,
+  right: TypeDescriptor | undefined,
+  methodNames: string[],
+  rightTypeText: string | undefined
+): TypeCompatibility {
+  if (methodNames.length === 0) {
+    return "unknown";
+  }
+
+  const receiverTypeFullName = resolveTypeFullName(index, left.normalized);
+  if (!receiverTypeFullName) {
+    return "unknown";
+  }
+
+  const signatures = collectMethodSignaturesByNames(
+    index,
+    receiverTypeFullName,
+    methodNames
+  );
+  if (signatures.length === 0) {
+    return "unknown";
+  }
+
+  if (!right) {
+    return "unknown";
+  }
+
+  const resolution = resolveBestCallableOverload(index, signatures, [rightTypeText]);
+  if (resolution.matched) {
+    const methodName = resolution.best?.name ?? "";
+    if (methodName === "opAssign" || methodName.endsWith("Assign")) {
+      return "compatible";
+    }
+
+    const resolvedTypeText = resolution.resolvedReturnType ?? resolution.best?.returnType;
+    const resolvedDescriptor = parseTypeDescriptor(resolvedTypeText, index);
+    const assignability = evaluateConversion(
+      index,
+      left,
+      resolvedDescriptor,
+      new Map<string, TypeDescriptor>()
+    );
+    if (assignability.status === "compatible") {
+      return "compatible";
+    }
+    return assignability.status;
+  }
+  return resolution.sawIncompatibleType ? "incompatible" : "unknown";
+}
+
 function inferSimpleLiteralType(text: string): string | undefined {
   if (text === "true" || text === "false") {
     return "bool";
@@ -1003,8 +1391,8 @@ function evaluateTypeTextCompatibility(
   expectedTypeText: string | undefined,
   actualTypeText: string | undefined
 ): TypeCompatibility {
-  const expected = parseTypeDescriptor(expectedTypeText);
-  const actual = parseTypeDescriptor(actualTypeText);
+  const expected = parseTypeDescriptor(expectedTypeText, index);
+  const actual = parseTypeDescriptor(actualTypeText, index);
   if (!expected) {
     return "unknown";
   }
@@ -1015,14 +1403,17 @@ function evaluateConversion(
   index: CompletionIndex,
   expected: TypeDescriptor,
   actual: TypeDescriptor | undefined,
-  templateBindings: Map<string, TypeDescriptor>
+  templateBindings: Map<string, TypeDescriptor>,
+  recursionDepth = 0
 ): ConversionResult {
   if (expected.isAny) {
     return { status: "compatible", cost: 6 };
   }
 
   if (!actual) {
-    return { status: "unknown", cost: 0 };
+    return expected.isPrimitive
+      ? { status: "incompatible", cost: 0 }
+      : { status: "unknown", cost: 0 };
   }
 
   if (expected.isTemplateParameter) {
@@ -1032,7 +1423,7 @@ function evaluateConversion(
       return { status: "compatible", cost: 0 };
     }
 
-    return evaluateConversion(index, existing, actual, templateBindings);
+    return evaluateConversion(index, existing, actual, templateBindings, recursionDepth);
   }
 
   if (actual.isAny || actual.isTemplateParameter) {
@@ -1043,12 +1434,59 @@ function evaluateConversion(
     if (expected.isHandle) {
       return { status: "compatible", cost: 1 };
     }
-    return expected.isPrimitive
-      ? { status: "incompatible", cost: 0 }
-      : { status: "unknown", cost: 0 };
+    return { status: "incompatible", cost: 0 };
   }
 
   if (expected.isHandle !== actual.isHandle) {
+    if (expected.isHandle && !actual.isHandle) {
+      const expectedValueDescriptor: TypeDescriptor = {
+        ...expected,
+        isHandle: false
+      };
+      const valueConversion = evaluateConversion(
+        index,
+        expectedValueDescriptor,
+        actual,
+        templateBindings,
+        recursionDepth + 1
+      );
+      if (valueConversion.status === "compatible") {
+        return { status: "compatible", cost: valueConversion.cost + 1 };
+      }
+      if (valueConversion.status === "unknown") {
+        return valueConversion;
+      }
+    }
+    if (!expected.isHandle && actual.isHandle) {
+      const actualValueDescriptor: TypeDescriptor = {
+        ...actual,
+        isHandle: false
+      };
+      const valueConversion = evaluateConversion(
+        index,
+        expected,
+        actualValueDescriptor,
+        templateBindings,
+        recursionDepth + 1
+      );
+      if (valueConversion.status === "compatible") {
+        return { status: "compatible", cost: valueConversion.cost + 1 };
+      }
+      if (valueConversion.status === "unknown") {
+        return valueConversion;
+      }
+    }
+
+    const userDefinedConversion = tryResolveUserDefinedConversion(
+      index,
+      expected,
+      actual,
+      templateBindings,
+      recursionDepth
+    );
+    if (userDefinedConversion) {
+      return userDefinedConversion;
+    }
     return { status: "incompatible", cost: 0 };
   }
 
@@ -1085,7 +1523,8 @@ function evaluateConversion(
         index,
         expected.genericArgs[i],
         actual.genericArgs[i],
-        templateBindings
+        templateBindings,
+        recursionDepth
       );
       if (conversion.status === "incompatible") {
         return conversion;
@@ -1114,11 +1553,142 @@ function evaluateConversion(
     return { status: "incompatible", cost: 0 };
   }
 
+  const userDefinedConversion = tryResolveUserDefinedConversion(
+    index,
+    expected,
+    actual,
+    templateBindings,
+    recursionDepth
+  );
+  if (userDefinedConversion) {
+    return userDefinedConversion;
+  }
+
+  if (expected.isPrimitive !== actual.isPrimitive) {
+    return { status: "incompatible", cost: 0 };
+  }
+
   if (expected.shortBase === actual.shortBase) {
     return { status: "compatible", cost: 1 };
   }
 
   return { status: "unknown", cost: 0 };
+}
+
+function tryResolveUserDefinedConversion(
+  index: CompletionIndex,
+  expected: TypeDescriptor,
+  actual: TypeDescriptor,
+  templateBindings: Map<string, TypeDescriptor>,
+  recursionDepth: number
+): ConversionResult | undefined {
+  if (recursionDepth >= 2) {
+    return undefined;
+  }
+
+  const actualTypeFullName = resolveTypeFullName(index, actual.normalized);
+  const expectedTypeFullName = resolveTypeFullName(index, expected.normalized);
+  const conversionCandidateTypeText = descriptorToTypeText(actual);
+  let best:
+    | {
+        cost: number;
+        bindings: Map<string, TypeDescriptor>;
+      }
+    | undefined;
+
+  const tryCandidateConversion = (
+    candidateDescriptor: TypeDescriptor | undefined,
+    baseCost: number
+  ): void => {
+    if (!candidateDescriptor) {
+      return;
+    }
+
+    const candidateBindings = new Map(templateBindings);
+    const conversion = evaluateConversion(
+      index,
+      expected,
+      candidateDescriptor,
+      candidateBindings,
+      recursionDepth + 1
+    );
+    if (conversion.status !== "compatible") {
+      return;
+    }
+
+    const candidateCost = conversion.cost + baseCost;
+    if (!best || candidateCost < best.cost) {
+      best = {
+        cost: candidateCost,
+        bindings: candidateBindings
+      };
+    }
+  };
+
+  if (actualTypeFullName) {
+    const implicitConversions = collectMethodSignaturesByNames(
+      index,
+      actualTypeFullName,
+      ["opImplConv", "opConv"]
+    );
+    for (const conversion of implicitConversions) {
+      if (conversion.parameters.length !== 0) {
+        continue;
+      }
+      const descriptor = parseTypeDescriptor(conversion.returnType, index);
+      const baseCost = conversion.name === "opImplConv" ? 3 : 5;
+      tryCandidateConversion(descriptor, baseCost);
+    }
+  }
+
+  if (expectedTypeFullName && conversionCandidateTypeText) {
+    const expectedTypeInfo = index.typeInfoByFullName.get(expectedTypeFullName);
+    const expectedTypeName = expectedTypeInfo?.shortName;
+    const constructorMethodNames = expectedTypeName
+      ? [expectedTypeName, "opAssign"]
+      : ["opAssign"];
+    const constructors = collectMethodSignaturesByNames(
+      index,
+      expectedTypeFullName,
+      constructorMethodNames
+    );
+
+    for (const constructor of constructors) {
+      if (constructor.parameters.length !== 1) {
+        continue;
+      }
+      const resolution = resolveBestCallableOverload(
+        index,
+        [constructor],
+        [conversionCandidateTypeText]
+      );
+      if (!resolution.matched) {
+        continue;
+      }
+
+      const candidateBindings = new Map(templateBindings);
+      if (!best || 4 < best.cost) {
+        best = {
+          cost: 4,
+          bindings: candidateBindings
+        };
+      }
+    }
+  }
+
+  if (!best) {
+    return undefined;
+  }
+
+  templateBindings.clear();
+  for (const [name, descriptor] of best.bindings) {
+    templateBindings.set(name, descriptor);
+  }
+
+  return {
+    status: "compatible",
+    cost: best.cost
+  };
 }
 
 function getInheritanceDistance(
@@ -1200,7 +1770,10 @@ function areBaseTypesEquivalent(
   return !!leftFull && !!rightFull && leftFull === rightFull;
 }
 
-function parseTypeDescriptor(typeText: string | undefined): TypeDescriptor | undefined {
+function parseTypeDescriptor(
+  typeText: string | undefined,
+  index?: CompletionIndex
+): TypeDescriptor | undefined {
   if (!typeText) {
     return undefined;
   }
@@ -1253,19 +1826,35 @@ function parseTypeDescriptor(typeText: string | undefined): TypeDescriptor | und
     base = normalized.slice(0, genericOpen).trim();
     const inner = normalized.slice(genericOpen + 1, -1);
     genericArgs = splitTopLevelByComma(inner)
-      .map((part) => parseTypeDescriptor(part))
+      .map((part) => parseTypeDescriptor(part, index))
       .filter((value): value is TypeDescriptor => value !== undefined);
   }
 
-  const shortBase = (base.split("::").pop() ?? base).toLowerCase();
+  let resolvedBase = base;
+  if (
+    index &&
+    resolvedBase.includes("::") &&
+    !tryResolveTypeFullNameFromTypeString(index, resolvedBase)
+  ) {
+    const prefix = resolvedBase.slice(0, resolvedBase.lastIndexOf("::"));
+    if (prefix && tryResolveTypeFullNameFromTypeString(index, prefix)) {
+      resolvedBase = prefix;
+    }
+  }
+
+  const shortBase = (resolvedBase.split("::").pop() ?? resolvedBase).toLowerCase();
+  const resolvesToKnownType =
+    !!index && !!tryResolveTypeFullNameFromTypeString(index, resolvedBase);
   const isTemplateParameter =
-    /^[A-Z][A-Za-z0-9_]*$/.test(base) && !base.includes("::");
+    /^[A-Z][A-Za-z0-9_]*$/.test(resolvedBase) &&
+    !resolvedBase.includes("::") &&
+    !resolvesToKnownType;
   const isAny = shortBase === "auto" || shortBase === "var" || shortBase === "?";
 
   return {
     raw: typeText,
     normalized,
-    base,
+    base: resolvedBase,
     shortBase,
     genericArgs,
     isHandle,
@@ -1278,11 +1867,16 @@ function parseTypeDescriptor(typeText: string | undefined): TypeDescriptor | und
 }
 
 function resolveKnownTypeName(index: CompletionIndex, typeName: string): string | undefined {
-  if (index.typeInfoByFullName.has(typeName)) {
-    return typeName;
+  const normalized = normalizeTypeText(typeName).trim();
+  if (isPrimitiveTypeName(normalized)) {
+    return normalized;
   }
 
-  const fullNames = index.typeFullNamesByShortName.get(typeName);
+  if (index.typeInfoByFullName.has(normalized)) {
+    return normalized;
+  }
+
+  const fullNames = index.typeFullNamesByShortName.get(normalized);
   if (!fullNames || fullNames.length === 0) {
     return undefined;
   }
@@ -1302,7 +1896,7 @@ function resolveTypeFullName(
     return undefined;
   }
 
-  const descriptor = parseTypeDescriptor(typeName);
+  const descriptor = parseTypeDescriptor(typeName, index);
   if (!descriptor) {
     return undefined;
   }
@@ -1395,7 +1989,7 @@ function numericConversionCost(expectedType: string, actualType: string): number
 }
 
 function canonicalNumericType(typeName: string): string {
-  const short = (typeName.split("::").pop() ?? typeName).toLowerCase();
+  const short = normalizeShortTypeName(typeName);
   if (short === "int32") {
     return "int";
   }
@@ -1453,14 +2047,14 @@ function isBoolTypeName(typeName: string | undefined): boolean {
   if (!typeName) {
     return false;
   }
-  return (typeName.split("::").pop() ?? typeName).toLowerCase() === "bool";
+  return normalizeShortTypeName(typeName) === "bool";
 }
 
 function isStringTypeName(typeName: string | undefined): boolean {
   if (!typeName) {
     return false;
   }
-  return (typeName.split("::").pop() ?? typeName).toLowerCase() === "string";
+  return normalizeShortTypeName(typeName) === "string";
 }
 
 function isNumericTypeName(typeName: string | undefined): boolean {
@@ -1488,6 +2082,24 @@ function isIntegerTypeName(typeName: string | undefined): boolean {
     short === "int64" ||
     short === "uint64"
   );
+}
+
+function normalizeShortTypeName(typeName: string): string {
+  let normalized = normalizeTypeText(typeName)
+    .replace(/\b(?:const|in|out|inout)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  while (normalized.endsWith("&")) {
+    normalized = normalized.slice(0, -1).trimEnd();
+  }
+  return (normalized.split("::").pop() ?? normalized).toLowerCase();
+}
+
+function normalizeBangIsOperator(text: string): string {
+  if (!text.includes("!is")) {
+    return text;
+  }
+  return text.replace(/(^|[\s)\]])!is(?=[\s([]|$)/g, "$1!=");
 }
 
 function splitTopLevelByComma(text: string): string[] {
@@ -1526,6 +2138,7 @@ function splitTopLevelByComma(text: string): string[] {
       inDoubleQuote = true;
       continue;
     }
+
     if (ch === "(") {
       parenDepth += 1;
       continue;
@@ -1666,6 +2279,17 @@ function findTopLevelChar(text: string, target: string): number {
       inDoubleQuote = true;
       continue;
     }
+
+    if (
+      ch === target &&
+      parenDepth === 0 &&
+      bracketDepth === 0 &&
+      braceDepth === 0 &&
+      angleDepth === 0
+    ) {
+      return i;
+    }
+
     if (ch === "(") {
       parenDepth += 1;
       continue;
@@ -1698,16 +2322,6 @@ function findTopLevelChar(text: string, target: string): number {
       angleDepth = Math.max(0, angleDepth - 1);
       continue;
     }
-
-    if (
-      ch === target &&
-      parenDepth === 0 &&
-      bracketDepth === 0 &&
-      braceDepth === 0 &&
-      angleDepth === 0
-    ) {
-      return i;
-    }
   }
 
   return -1;
@@ -1721,6 +2335,8 @@ function parseExpressionAst(text: string): ExpressionNode | undefined {
 
 function tokenizeExpression(text: string): ExpressionToken[] {
   const tokens: ExpressionToken[] = [];
+  const fourCharSymbols = new Set<string>([">>>="]);
+  const threeCharSymbols = new Set<string>(["...", ">>>", "<<=", ">>=", "**="]);
   const twoCharSymbols = new Set<string>([
     "::",
     "==",
@@ -1729,14 +2345,25 @@ function tokenizeExpression(text: string): ExpressionToken[] {
     ">=",
     "&&",
     "||",
+    "**",
     "<<",
     ">>",
+    "+=",
+    "-=",
+    "*=",
+    "/=",
+    "%=",
+    "&=",
+    "|=",
+    "^=",
     "->"
   ]);
 
   for (let i = 0; i < text.length; ) {
     const ch = text[i];
     const next = i + 1 < text.length ? text[i + 1] : "";
+    const third = i + 2 < text.length ? text[i + 2] : "";
+    const fourth = i + 3 < text.length ? text[i + 3] : "";
 
     if (/\s/.test(ch)) {
       i += 1;
@@ -1821,6 +2448,30 @@ function tokenizeExpression(text: string): ExpressionToken[] {
       continue;
     }
 
+    const quad = `${ch}${next}${third}${fourth}`;
+    if (fourCharSymbols.has(quad)) {
+      tokens.push({
+        kind: "symbol",
+        text: quad,
+        start: i,
+        end: i + 4
+      });
+      i += 4;
+      continue;
+    }
+
+    const triple = `${ch}${next}${third}`;
+    if (threeCharSymbols.has(triple)) {
+      tokens.push({
+        kind: "symbol",
+        text: triple,
+        start: i,
+        end: i + 3
+      });
+      i += 3;
+      continue;
+    }
+
     const pair = ch + next;
     if (twoCharSymbols.has(pair)) {
       tokens.push({
@@ -1863,7 +2514,11 @@ class ExpressionParser {
   public constructor(private readonly tokens: ExpressionToken[]) {}
 
   public parseExpression(): ExpressionNode | undefined {
-    return this.parseConditional();
+    const expression = this.parseConditional();
+    if (!expression || !this.isAtEnd()) {
+      return undefined;
+    }
+    return expression;
   }
 
   private parseConditional(): ExpressionNode | undefined {
@@ -2025,7 +2680,7 @@ class ExpressionParser {
         const args: ExpressionNode[] = [];
         if (!this.checkSymbol(")")) {
           while (true) {
-            const argument = this.parseConditional();
+            const argument = this.parseCallArgument();
             if (!argument) {
               break;
             }
@@ -2076,6 +2731,27 @@ class ExpressionParser {
     }
 
     return node;
+  }
+
+  private parseCallArgument(): ExpressionNode | undefined {
+    const checkpoint = this.index;
+    const first = this.current();
+    const second = this.peek(1);
+    if (
+      this.isIdentifierLike(first) &&
+      second.kind === "symbol" &&
+      (second.text === ":" || second.text === "=")
+    ) {
+      this.advance();
+      this.advance();
+      const namedValue = this.parseConditional();
+      if (namedValue) {
+        return namedValue;
+      }
+      this.index = checkpoint;
+    }
+
+    return this.parseConditional();
   }
 
   private parsePrimary(): ExpressionNode | undefined {
@@ -2181,6 +2857,10 @@ class ExpressionParser {
 
   private current(): ExpressionToken {
     return this.tokens[Math.min(this.index, this.tokens.length - 1)];
+  }
+
+  private peek(offset: number): ExpressionToken {
+    return this.tokens[Math.min(this.index + offset, this.tokens.length - 1)];
   }
 
   private advance(): void {

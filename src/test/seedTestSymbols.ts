@@ -1,15 +1,24 @@
 import { CompletionItemKind } from "vscode-languageserver/node";
-import { addSymbol } from "../server/completions";
+import { addSymbol, registerNamespacePath } from "../server/completions";
 import type { CompletionIndex } from "../server/types";
 
 export function seedTestSymbols(index: CompletionIndex): void {
+  registerNamespacePath(index, "UI");
+
   index.coreGlobalFunctionNames.add("GetApp");
   index.coreGlobalFunctionNames.add("Text");
+  index.coreGlobalFunctionNames.add("print");
   index.coreGlobalFuncdefNames.add("CoroutineFunc");
 
   index.coreFunctionReturnTypes.set("GetApp", "CGameCtnApp@");
   index.coreFunctionSignatures.set("GetApp", ["CGameCtnApp@ GetApp()"]);
   index.coreFunctionSignatures.set("Text", ["void Text(const string &in text)"]);
+  index.coreFunctionSignatures.set("print", [
+    "void print(const string &in text)",
+    "void print(int value)",
+    "void print(float value)",
+    "void print(bool value)"
+  ]);
   index.coreFunctionSignaturesByQualifiedName.set("UI::Text", [
     "void UI::Text(const string &in text)",
     "void UI::Text(const string &in text, vec2 size)"

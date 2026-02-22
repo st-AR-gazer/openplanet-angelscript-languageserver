@@ -7,6 +7,8 @@ import {
   CompletionParams,
   createConnection,
   Declaration,
+  Diagnostic,
+  DiagnosticSeverity,
   DidChangeConfigurationNotification,
   DidChangeWatchedFilesNotification,
   DocumentHighlight,
@@ -36,7 +38,8 @@ import {
 import {
   collectCompletionItems,
   createCompletionIndex,
-  getActiveNamespaceAtPosition
+  getActiveNamespaceAtPosition,
+  resolveCompletionItemDetails
 } from "./server/completions";
 import {
   buildQuickFixCodeActions,
@@ -60,6 +63,11 @@ import {
   clearImportValidationCache,
   getImportDiagnostics
 } from "./server/imports";
+import {
+  getInlineValuesForRange,
+  type InlineValuePayload,
+  type InlineValuesRequestParams
+} from "./server/inlineValues";
 import {
   collectMemberCompletionItems,
   getDotCompletionContext,
@@ -145,6 +153,17 @@ let scopedAnalysisGeneration = 0;
 const includeScopeCache = new Map<string, { generation: number; uris: string[] }>();
 const semanticTokenSnapshots = new Map<string, SemanticTokenSnapshot>();
 let semanticTokenResultCounter = 0;
+const publishedDiagnosticsByUri = new Map<string, Diagnostic[]>();
+
+const provideInlineValuesRequest = "openplanet/provideInlineValues";
+const provideFileDecorationRequest = "openplanet/provideFileDecoration";
+
+interface FileDecorationPayload {
+  badge?: string;
+  tooltip?: string;
+  color?: string;
+  propagate?: boolean;
+}
 
 connection.onInitialize((params: InitializeParams): InitializeResult => {
   hasConfigurationCapability = Boolean(
@@ -171,7 +190,8 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
     capabilities: {
       textDocumentSync: TextDocumentSyncKind.Incremental,
       completionProvider: {
-        triggerCharacters: [":", "."]
+        triggerCharacters: [":", "."],
+        resolveProvider: true
       },
       hoverProvider: true,
       definitionProvider: true,
@@ -254,7 +274,7 @@ documents.onDidClose((event) => {
   analysisCache.delete(event.document.uri);
   semanticTokenSnapshots.delete(event.document.uri);
   void refreshWorkspaceAnalysisForUri(event.document.uri, "document-closed");
-  connection.sendDiagnostics({ uri: event.document.uri, diagnostics: [] });
+  publishDiagnostics(event.document.uri, undefined, []);
 });
 
 connection.onDidChangeWatchedFiles((event) => {
@@ -320,6 +340,10 @@ connection.onCompletion(
     return sliceToMaxItems(items);
   }
 );
+
+connection.onCompletionResolve((item): CompletionItem => {
+  return resolveCompletionItemDetails(item);
+});
 
 connection.onDefinition(async (params) => {
   await workspaceAnalysisBuildPromise;
@@ -609,6 +633,63 @@ connection.onWorkspaceSymbol(async (params): Promise<SymbolInformation[]> => {
   return getWorkspaceSymbols(getAllOpenDocumentAnalyses(), params.query);
 });
 
+connection.onRequest(
+  provideInlineValuesRequest,
+  async (params: InlineValuesRequestParams): Promise<InlineValuePayload[]> => {
+    await workspaceAnalysisBuildPromise;
+
+    const document = documents.get(params.textDocument.uri);
+    if (!document) {
+      return [];
+    }
+
+    const analysis = getDocumentAnalysis(document);
+    return getInlineValuesForRange(document, analysis, params.range);
+  }
+);
+
+connection.onRequest(
+  provideFileDecorationRequest,
+  (uri: string): FileDecorationPayload | null => {
+    const diagnostics = publishedDiagnosticsByUri.get(uri) ?? [];
+    if (diagnostics.length === 0) {
+      return null;
+    }
+
+    let errorCount = 0;
+    let warningCount = 0;
+    for (const diagnostic of diagnostics) {
+      const severity = diagnostic.severity ?? DiagnosticSeverity.Error;
+      if (severity === DiagnosticSeverity.Error) {
+        errorCount += 1;
+      } else if (severity === DiagnosticSeverity.Warning) {
+        warningCount += 1;
+      }
+    }
+
+    if (errorCount > 0) {
+      return {
+        badge: "!",
+        tooltip:
+          warningCount > 0
+            ? `${errorCount} error(s), ${warningCount} warning(s)`
+            : `${errorCount} error(s)`,
+        color: "problemsErrorIcon.foreground"
+      };
+    }
+
+    if (warningCount > 0) {
+      return {
+        badge: "~",
+        tooltip: `${warningCount} warning(s)`,
+        color: "problemsWarningIcon.foreground"
+      };
+    }
+
+    return null;
+  }
+);
+
 connection.languages.inlayHint.on(
   async (params): Promise<InlayHint[]> => {
     await Promise.all([completionIndexBuildPromise, workspaceAnalysisBuildPromise]);
@@ -624,7 +705,9 @@ connection.languages.inlayHint.on(
       analysis,
       completionIndex,
       params.range,
-      workspaceFunctionDeclarationsByName
+      settings.inlayHints,
+      workspaceFunctionDeclarationsByName,
+      workspaceFunctionReturnTypes
     );
   }
 );
@@ -940,7 +1023,7 @@ async function validateTextDocument(
 ): Promise<void> {
   const targetUri = document.uri;
   const targetVersion = document.version;
-  const diagnostics = [];
+  const diagnostics: Diagnostic[] = [];
   let analysis: DocumentAnalysis | undefined;
 
   if (isValidationCancelled(targetUri, targetVersion, expectedGeneration)) {
@@ -988,11 +1071,7 @@ async function validateTextDocument(
         return;
       }
 
-      connection.sendDiagnostics({
-        uri: targetUri,
-        version: targetVersion,
-        diagnostics
-      });
+      publishDiagnostics(targetUri, targetVersion, diagnostics);
       return;
     }
 
@@ -1015,11 +1094,7 @@ async function validateTextDocument(
     return;
   }
 
-  connection.sendDiagnostics({
-    uri: targetUri,
-    version: targetVersion,
-    diagnostics
-  });
+  publishDiagnostics(targetUri, targetVersion, diagnostics);
 }
 
 function isCompletionIndexReadyForCurrentSettings(): boolean {
@@ -1030,6 +1105,24 @@ function serializeSettingsKey(
   value: OpenplanetLanguageServerSettings
 ): string {
   return JSON.stringify(value);
+}
+
+function publishDiagnostics(
+  uri: string,
+  version: number | undefined,
+  diagnostics: Diagnostic[]
+): void {
+  if (diagnostics.length > 0) {
+    publishedDiagnosticsByUri.set(uri, [...diagnostics]);
+  } else {
+    publishedDiagnosticsByUri.delete(uri);
+  }
+
+  connection.sendDiagnostics({
+    uri,
+    version,
+    diagnostics
+  });
 }
 
 function getDocumentAnalysis(document: TextDocument): DocumentAnalysis {

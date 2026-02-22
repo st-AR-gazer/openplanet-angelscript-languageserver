@@ -1,0 +1,59 @@
+{
+  "defaults": {
+    "suite": "ExampleSuite",
+    "strictDiagnosticText": true,
+    "transport": "auto",
+    "timeoutSec": 20,
+    "waitFrames": 20,
+    "companionHost": "127.0.0.1",
+    "companionPort": 32000
+  },
+  "entries": [
+    {
+      "id": "openplanet-next-current",
+      "snapshotKey": "openplanet-next-current"
+    },
+    {
+      "id": "openplanet-next-current-semantic",
+      "snapshotKey": "openplanet-next-current-semantic",
+      "strictDiagnosticText": false
+    },
+    {
+      "id": "openplanet-next-smoke-compile-success",
+      "snapshotKey": "openplanet-next-smoke-compile-success",
+      "casePatterns": ["smoke.compile_success.*"]
+    },
+    {
+      "id": "openplanet-next-smoke-compile-error",
+      "snapshotKey": "openplanet-next-smoke-compile-error",
+      "casePatterns": ["smoke.compile_error.*"]
+    },
+    {
+      "id": "openplanet-next-full-corpus-strict",
+      "snapshotKey": "openplanet-next-full-corpus-strict",
+      "suite": "ExampleSuite",
+      "fixturesPath": "D:\\OpenplanetDev\\suites\\ExampleSuite\\conformance\\generated\\primitive-matrix.oracle.jsonl",
+      "strictDiagnosticText": true
+    },
+    {
+      "id": "openplanet-next-playersearch-smoke",
+      "snapshotKey": "openplanet-next-playersearch-smoke",
+      "suite": "PlayerSearchSuite",
+      "fixturesPath": "test-files/conformance/cross-suite-smoke.jsonl",
+      "strictDiagnosticText": false
+    },
+    {
+      "id": "openplanet-next-betterfolders-smoke",
+      "snapshotKey": "openplanet-next-betterfolders-smoke",
+      "suite": "BetterFoldersSuite",
+      "fixturesPath": "test-files/conformance/cross-suite-smoke.jsonl",
+      "strictDiagnosticText": false,
+      "casePatterns": [
+        "smoke.compile_success.basic",
+        "smoke.compile_success.loop",
+        "smoke.compile_success.function_call",
+        "smoke.compile_error.*"
+      ]
+    }
+  ]
+}

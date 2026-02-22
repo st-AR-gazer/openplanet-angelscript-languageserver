@@ -82,6 +82,7 @@ This extension runs an LSP server with incremental text synchronization and prov
 
 All diagnostics use source `openplanet-angelscript-ls`.
 Compile-blocking diagnostics are emitted as `Error` severity (red squiggles).
+Compiler-parity advisory diagnostics are emitted as `Warning` severity.
 
 - `missing-include`
   - unresolved `#include "..."` path
@@ -89,6 +90,10 @@ Compile-blocking diagnostics are emitted as `Error` severity (red squiggles).
   - `import ... from "Module"` did not match any plugin folder or `.op` package in configured plugin roots
 - `import-source-folder-only`
   - import source matched folder target(s) but no `.op` package match
+- `implicit-conversion-not-exact`
+  - implicit floating-point to integer conversion may lose precision
+- `string-parameter-pass-by-value`
+  - sanity check warning for `string` parameters not passed by reference (`const string &in`)
 - `import-function-not-found`
   - import source matched, but imported function name was not found in matched target sources
 - `import-function-signature-mismatch`
@@ -363,6 +368,227 @@ npm run test:integration
 ```
 
 This launches the compiled language server process and validates end-to-end JSON-RPC behavior (initialize/open/publishDiagnostics/hover/references).
+
+### Conformance Regression Suite
+
+Run:
+
+```powershell
+npm run test:conformance
+```
+
+This executes fixture-driven compile-parity checks from `test-files/conformance/cases.jsonl`.
+Each case is materialized as a temporary plugin-like folder (`info.toml` + `src/main.as` + extra files),
+then language-server syntax/semantic diagnostics are classified as:
+
+- `compile_success`
+- `compile_error`
+
+Optional warning parity fields in fixtures:
+
+- `expect_warning` (`true|false`) to assert whether any warning diagnostics should exist
+- `expect_warning_contains` (`string[]`) substrings that must appear in warning diagnostics
+- `reject_warning_contains` (`string[]`) substrings that must not appear in warning diagnostics
+
+Strict diagnostic-text parity fields in fixtures:
+
+- `strict_diagnostic_text` (`true|false`) to opt-in per-case strict message matching
+- `expect_diagnostic_text.ERR` (`string[]`) exact error messages that must appear
+- `expect_diagnostic_text.WARN` (`string[]`) exact warning messages that must appear
+- `expect_diagnostic_text.INFO` (`string[]`) exact info messages that must appear
+- `reject_diagnostic_text.{ERR|WARN|INFO}` (`string[]`) exact messages that must not appear
+
+CLI options:
+
+```powershell
+node out/test/runConformanceTests.js --help
+```
+
+Key options:
+
+- `--fixtures <path>`: use a different fixture file (`.jsonl` or `.json`)
+- `--case <glob>`: run a filtered subset of case IDs (repeatable)
+- `--oracle-run <path>`: load expected outcomes from OpDev conformance `run.jsonl` (or run dir containing `run.jsonl`)
+- `--report <path>`: write JSON summary report
+- `--verbose`: include per-diagnostic lines for failed cases
+- `--strict-diagnostic-text`: enforce strict `ERR`/`WARN`/`INFO` text matching when fixture includes `expect_diagnostic_text`
+
+Env overrides:
+
+- `OPAS_CONFORMANCE_FIXTURES`
+- `OPAS_CONFORMANCE_ORACLE_RUN`
+- `OPAS_CONFORMANCE_REPORT`
+- `OPAS_CONFORMANCE_STRICT_DIAGNOSTIC_TEXT`
+
+Compiler-message snapshot sync (from AngelScript `as_texts.h`):
+
+```powershell
+npm run test:conformance:sync-texts
+```
+
+This refreshes `test-files/conformance/angelscript-texts.json` from:
+- `https://raw.githubusercontent.com/anjo76/angelscript/master/sdk/angelscript/source/as_texts.h`
+
+Use this snapshot to keep normalization/mapping logic aligned when AngelScript updates message templates.
+
+### One-Action Oracle Parity (Openplanet -> LS)
+
+Run:
+
+```powershell
+npm run test:oracle-parity
+```
+
+This orchestrates the full parity pipeline:
+
+1. `opdev suite companion-status`
+2. `opdev suite conformance` (real Openplanet compile behavior)
+3. language-server compile
+4. language-server conformance run against oracle `run.jsonl`
+
+Outputs are timestamped in:
+
+- `out/test/oracle-parity/<timestamp>-<suite>/summary.json`
+- `out/test/oracle-parity/<timestamp>-<suite>/ls-conformance-report.json`
+- per-step logs (`01-companion-status.log`, `02-opdev-conformance.log`, ...)
+
+Default suite/paths target `ExampleSuite` under `D:\OpenplanetDev`.
+Override with CLI flags:
+
+- `--suite <name>`
+- `--fixtures <path>`
+- `--case <glob>` (repeatable)
+- `--timeout-sec <n>`
+- `--wait-frames <n>`
+- `--transport <auto|socket|file>`
+- `--report-root <path>`
+- `--snapshot-key <name>` (group reports by target/version)
+- `--strict-diagnostic-text` (strict `ERR`/`WARN`/`INFO` text parity)
+
+Or environment variables:
+
+- `OPAS_PARITY_SUITE`
+- `OPAS_PARITY_FIXTURES`
+- `OPAS_SUITES_ROOT`
+- `OPAS_OPDEV_PY`
+- `OPAS_PYTHON`
+- `OPAS_PARITY_TRANSPORT`
+- `OPAS_PARITY_TIMEOUT_SEC`
+- `OPAS_PARITY_WAIT_FRAMES`
+- `OPAS_PARITY_COMPANION_HOST`
+- `OPAS_PARITY_COMPANION_PORT`
+- `OPAS_PARITY_REPORT_ROOT`
+- `OPAS_PARITY_SNAPSHOT_KEY`
+- `OPAS_PARITY_STRICT_DIAGNOSTIC_TEXT`
+
+Strict single-run shortcut:
+
+```powershell
+npm run test:oracle-parity:strict
+```
+
+VS Code one-click equivalent:
+
+- Run Task: `Oracle Parity (Openplanet)` (from `.vscode/tasks.json`)
+
+### Multi-Version Oracle Parity Matrix
+
+Run:
+
+```powershell
+npm run test:oracle-parity:matrix
+```
+
+This runs oracle parity sequentially for each entry in `.github/oracle-parity-matrix.json`.
+Each entry gets a dedicated `snapshotKey` so results are stored as per-version snapshots under:
+
+- `out/test/oracle-parity/<snapshotKey>/<timestamp>-<suite>/...`
+- aggregate matrix report: `out/test/oracle-parity-matrix/<timestamp>-matrix/summary.json`
+
+Current default matrix entries:
+
+- `openplanet-next-current` (strict diagnostic-text parity)
+- `openplanet-next-current-semantic` (semantic parity without strict text matching)
+- `openplanet-next-smoke-compile-success` (focused compile-success smoke slice)
+- `openplanet-next-smoke-compile-error` (focused compile-error smoke slice)
+- `openplanet-next-full-corpus-strict` (1200-case generated corpus strict parity from `D:\OpenplanetDev\suites\ExampleSuite\conformance\generated\primitive-matrix.oracle.jsonl`)
+- `openplanet-next-playersearch-smoke` (PlayerSearchSuite smoke corpus from `test-files/conformance/cross-suite-smoke.jsonl`, semantic parity)
+- `openplanet-next-betterfolders-smoke` (BetterFoldersSuite filtered smoke subset from `test-files/conformance/cross-suite-smoke.jsonl`, semantic parity; excludes `smoke.compile_success.namespace_call` because it can drop the companion connection on this suite/host)
+
+Matrix CLI options:
+
+- `--matrix <path>`: override matrix file
+- `--entry <glob>`: run a subset of matrix entries
+- `--strict`: fail process if any entry fails (default)
+- `--no-strict`: keep process success while still recording failures
+
+### One-Action Oracle Bootstrap (Autogenerate Compiler Data)
+
+Run:
+
+```powershell
+npm run test:oracle-bootstrap
+```
+
+This does a discovery + parity bootstrap automatically:
+
+1. generate a large conformance corpus (`primitive-matrix.raw.jsonl`) with:
+   - identifier-position matrix (locals, params, functions, class members, namespace symbols, enum labels)
+   - default-arg quirks
+   - handle/null/reference (`@`, `&in/out/inout`) cases
+   - operator-overload edge cases (`opAssign`, `opImplConv`, `opIndex`, ambiguity probes)
+   - import-surface oddities (folder vs `.op` mismatch patterns)
+   - assignment/call/return/operator matrix
+2. run Openplanet compile conformance on that corpus (discovery pass)
+3. materialize oracle expectations (`primitive-matrix.oracle.jsonl`) and compiler message compendium from observed outcomes
+4. run full oracle parity (`test:oracle-parity`) on the materialized fixture
+
+Generated corpus files (suite-local):
+
+- `D:\OpenplanetDev\suites\<Suite>\conformance\generated\primitive-matrix.raw.jsonl`
+- `D:\OpenplanetDev\suites\<Suite>\conformance\generated\primitive-matrix.oracle.jsonl`
+- `D:\OpenplanetDev\suites\<Suite>\conformance\generated\primitive-matrix.generation.json`
+- `D:\OpenplanetDev\suites\<Suite>\conformance\generated\primitive-matrix.materialization.json`
+- `D:\OpenplanetDev\suites\<Suite>\conformance\generated\primitive-matrix.message-compendium.json`
+: includes full observed `ERR` / `WARN` / `INFO` compiler-message lists and compile-error-specific context message lists
+
+Timestamped bootstrap reports:
+
+- `out/test/oracle-bootstrap/<timestamp>-<suite>/summary.json`
+- step logs in the same folder
+
+Useful flags:
+
+- `--suite <name>`
+- `--max-cases <n>` (default: 2400)
+- `--identifier-only` (generate only identifier-name edge-case corpus)
+- `--timeout-sec <n>`
+- `--wait-frames <n>`
+- `--snapshot-key <name>`
+- `--strict-diagnostic-text` (default: false)
+
+VS Code one-click equivalents:
+
+- workspace root: `Oracle Bootstrap (Openplanet LS)`
+- LS repo: `Oracle Bootstrap (Generate Corpus + Parity)`
+
+Identifier-only shortcut:
+
+```powershell
+npm run test:oracle-bootstrap:identifiers
+```
+
+### CI/Nightly Parity Gate
+
+Workflow: `.github/workflows/oracle-parity-gate.yml`
+
+- runs on `self-hosted` Windows runner with `openplanet` label
+- triggers on `push`, `pull_request`, nightly schedule, and `workflow_dispatch`
+- validates matrix coverage (`.github/oracle-parity-matrix.json`) with a minimum of 6 entries and required `openplanet-next-full-corpus-strict`
+- executes `npm run test:oracle-parity:matrix -- --strict`
+- uploads parity artifacts from `out/test/oracle-parity/**` and `out/test/oracle-parity-matrix/**`
+
+For release gating, mark `Oracle Parity Gate / oracle-parity` as a required status check in branch protection.
 
 ### Release Hardening
 

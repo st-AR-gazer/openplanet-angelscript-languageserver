@@ -1,72 +1,43 @@
-const keywords = new Set<string>([
-  "if",
-  "else",
-  "for",
-  "foreach",
-  "while",
-  "do",
-  "switch",
-  "case",
-  "default",
-  "break",
-  "continue",
-  "return",
-  "class",
-  "interface",
-  "enum",
-  "namespace",
-  "funcdef",
-  "typedef",
-  "using",
-  "import",
-  "from",
-  "in",
-  "out",
-  "inout",
-  "is",
-  "not",
+import { generatedReservedIdentifiers } from "./reservedIdentifiers.generated";
+import {
+  angelScriptContextualKeywords,
+  angelScriptKeywordLikeTokens,
+  angelScriptReservedKeywords
+} from "./angelScriptTokenTables.generated";
+
+const reservedKeywords = new Set<string>(angelScriptReservedKeywords);
+const contextualKeywords = new Set<string>(angelScriptContextualKeywords);
+const keywordLikeTokens = new Set<string>(angelScriptKeywordLikeTokens);
+
+const contextualDisallowedIdentifierKeywords = new Set<string>([
   "and",
+  "is",
   "or",
-  "xor",
-  "cast",
-  "mixin",
-  "try",
-  "catch",
-  "throw",
-  "const",
-  "private",
-  "protected",
-  "shared",
-  "override",
-  "external",
-  "final",
-  "explicit",
-  "abstract",
-  "delete",
-  "this",
-  "super",
-  "property",
-  "get",
-  "set",
-  "function",
-  "true",
-  "false",
-  "null",
-  "void",
-  "bool",
-  "int",
-  "int8",
-  "int16",
-  "int32",
-  "int64",
-  "uint",
-  "uint8",
-  "uint16",
-  "uint32",
-  "uint64",
-  "float",
-  "double",
-  "auto"
+  "xor"
+]);
+
+const baseDisallowedIdentifierKeywords = new Set<string>([
+  ...reservedKeywords,
+  ...generatedReservedIdentifiers,
+  ...contextualDisallowedIdentifierKeywords
+]);
+
+const disallowedDeclarationIdentifierKeywords = new Set<string>([
+  ...baseDisallowedIdentifierKeywords
+]);
+
+const disallowedTopLevelFunctionIdentifierKeywords = new Set<string>([
+  ...baseDisallowedIdentifierKeywords,
+  "string"
+]);
+
+const disallowedLocalIdentifierKeywords = new Set<string>([
+  ...baseDisallowedIdentifierKeywords,
+  "string",
+]);
+
+const disallowedParameterIdentifierKeywords = new Set<string>([
+  ...baseDisallowedIdentifierKeywords
 ]);
 
 const declarationModifiers = new Set<string>([
@@ -92,11 +63,36 @@ const intrinsicCallableIdentifiers = new Set<string>([
   "uint32",
   "uint64",
   "float",
-  "double"
+  "double",
+  "string"
 ]);
 
 export function isLanguageKeyword(identifier: string): boolean {
-  return keywords.has(identifier);
+  return reservedKeywords.has(identifier);
+}
+
+export function isContextualKeyword(identifier: string): boolean {
+  return contextualKeywords.has(identifier);
+}
+
+export function isKeywordLikeToken(identifier: string): boolean {
+  return keywordLikeTokens.has(identifier);
+}
+
+export function isDisallowedLocalIdentifierKeyword(identifier: string): boolean {
+  return disallowedLocalIdentifierKeywords.has(identifier);
+}
+
+export function isDisallowedParameterIdentifierKeyword(identifier: string): boolean {
+  return disallowedParameterIdentifierKeywords.has(identifier);
+}
+
+export function isDisallowedDeclarationIdentifierKeyword(identifier: string): boolean {
+  return disallowedDeclarationIdentifierKeywords.has(identifier);
+}
+
+export function isDisallowedTopLevelFunctionIdentifierKeyword(identifier: string): boolean {
+  return disallowedTopLevelFunctionIdentifierKeywords.has(identifier);
 }
 
 export function isDeclarationModifier(token: string): boolean {

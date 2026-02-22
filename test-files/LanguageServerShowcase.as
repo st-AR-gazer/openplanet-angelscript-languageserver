@@ -3,14 +3,19 @@
 // Open this file in the Extension Development Host and test each section.
 // Expected diagnostics are intentional in this file.
 
+using namespace UI;
+
 #include "LocalInclude.as" // Should resolve: Go To Definition opens test-files/LocalInclude.as.
 #include "DoesNotExist_ShowMissingInclude.as" // Should show missing-include warning.
 
 // Document Symbols: these functions should appear in Outline.
 void Main() {
   // Completion (namespace + keywords): type below and trigger completion.
-  UI::
-  retu;
+  UI::AllowDoubleClick::break;
+
+  string string;
+
+  UI::SelectableFlags::AllowDoubleClick;
 
   // Signature Help (Openplanet core): place cursor inside parentheses.
   GetApp(
@@ -30,6 +35,9 @@ void Main() {
   mat3;
 
   vec3;
+
+  string out;
+
 
   // Definition/References/Rename for workspace function.
   int added = AddTwo(localCounter);

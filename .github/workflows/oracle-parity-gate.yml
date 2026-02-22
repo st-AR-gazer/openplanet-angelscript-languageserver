@@ -1,0 +1,88 @@
+name: Oracle Parity Gate
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+    inputs:
+      matrix_path:
+        description: "Path to matrix JSON file"
+        required: false
+        default: ".github/oracle-parity-matrix.json"
+      entry_filter:
+        description: "Optional entry glob filter (e.g. openplanet-next-*)"
+        required: false
+        default: ""
+
+jobs:
+  oracle-parity:
+    runs-on: [self-hosted, windows, openplanet]
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Compile
+        run: npm run compile
+
+      - name: Verify Matrix Coverage
+        shell: pwsh
+        run: |
+          $matrixPath = "${{ github.event.inputs.matrix_path || '.github/oracle-parity-matrix.json' }}"
+          if (-not (Test-Path $matrixPath)) {
+            throw "Matrix file not found: $matrixPath"
+          }
+          $matrix = Get-Content $matrixPath -Raw | ConvertFrom-Json
+          if (-not $matrix.entries) {
+            throw "Matrix file has no entries array: $matrixPath"
+          }
+          $entryCount = @($matrix.entries).Count
+          if ($entryCount -lt 6) {
+            throw "Oracle parity matrix coverage too small ($entryCount entries). Expected at least 6 entries."
+          }
+          $entryIds = @($matrix.entries | ForEach-Object { "$($_.id)" })
+          if (-not ($entryIds -contains "openplanet-next-full-corpus-strict")) {
+            throw "Oracle parity matrix must include openplanet-next-full-corpus-strict."
+          }
+          Write-Host "Oracle parity matrix entries: $entryCount"
+
+      - name: Oracle Parity Matrix Gate
+        shell: pwsh
+        env:
+          OPAS_PARITY_MATRIX: ${{ github.event.inputs.matrix_path || '.github/oracle-parity-matrix.json' }}
+          OPAS_PARITY_MATRIX_STRICT: "true"
+        run: |
+          $entryFilter = "${{ github.event.inputs.entry_filter }}"
+          if ([string]::IsNullOrWhiteSpace($entryFilter)) {
+            npm run test:oracle-parity:matrix -- --strict
+          } else {
+            npm run test:oracle-parity:matrix -- --strict --entry $entryFilter
+          }
+
+      - name: Upload Oracle Parity Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-parity-artifacts-${{ github.run_id }}
+          path: |
+            out/test/oracle-parity/**
+            out/test/oracle-parity-matrix/**
+          if-no-files-found: warn

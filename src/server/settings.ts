@@ -50,6 +50,25 @@ export function createDefaultSettings(): OpenplanetLanguageServerSettings {
       namespaces: [...defaultCompletionNamespaces],
       maxItems: 500
     },
+    inlayHints: {
+      enable: true,
+      parameterHintsForConstants: true,
+      parameterHintsForComplexExpressions: true,
+      parameterReferenceHints: true,
+      parameterHintsForSingleParameterFunctions: false,
+      typeHintsForAutos: true,
+      parameterHintsIgnoredParameterNames: [
+        "Object",
+        "FunctionName",
+        "Value",
+        "InValue",
+        "NewValue",
+        "Condition",
+        "Parameters",
+        "Params"
+      ],
+      parameterHintsIgnoredFunctionNames: []
+    },
     semanticTokens: {
       enable: true,
       mode: "minimal"
@@ -90,6 +109,7 @@ export function normalizeSettings(raw: unknown): OpenplanetLanguageServerSetting
   const parserRoot = toRecord(root.parser);
   const dependencyRoot = toRecord(root.dependencies);
   const symbolRoot = toRecord(root.symbols);
+  const inlayHintsRoot = toRecord(root.inlayHints);
   const semanticTokenRoot = toRecord(root.semanticTokens);
   const trackmania2020Root = toRecord(symbolRoot.trackmania2020);
   const turboRoot = toRecord(symbolRoot.turbo);
@@ -207,6 +227,46 @@ export function normalizeSettings(raw: unknown): OpenplanetLanguageServerSetting
     50
   );
 
+  const inlayHintsEnable =
+    typeof inlayHintsRoot.enable === "boolean"
+      ? inlayHintsRoot.enable
+      : defaults.inlayHints.enable;
+
+  const parameterHintsForConstants =
+    typeof inlayHintsRoot.parameterHintsForConstants === "boolean"
+      ? inlayHintsRoot.parameterHintsForConstants
+      : defaults.inlayHints.parameterHintsForConstants;
+
+  const parameterHintsForComplexExpressions =
+    typeof inlayHintsRoot.parameterHintsForComplexExpressions === "boolean"
+      ? inlayHintsRoot.parameterHintsForComplexExpressions
+      : defaults.inlayHints.parameterHintsForComplexExpressions;
+
+  const parameterReferenceHints =
+    typeof inlayHintsRoot.parameterReferenceHints === "boolean"
+      ? inlayHintsRoot.parameterReferenceHints
+      : defaults.inlayHints.parameterReferenceHints;
+
+  const parameterHintsForSingleParameterFunctions =
+    typeof inlayHintsRoot.parameterHintsForSingleParameterFunctions === "boolean"
+      ? inlayHintsRoot.parameterHintsForSingleParameterFunctions
+      : defaults.inlayHints.parameterHintsForSingleParameterFunctions;
+
+  const typeHintsForAutos =
+    typeof inlayHintsRoot.typeHintsForAutos === "boolean"
+      ? inlayHintsRoot.typeHintsForAutos
+      : defaults.inlayHints.typeHintsForAutos;
+
+  const parameterHintsIgnoredParameterNames = normalizeStringArray(
+    inlayHintsRoot.parameterHintsIgnoredParameterNames,
+    defaults.inlayHints.parameterHintsIgnoredParameterNames
+  );
+
+  const parameterHintsIgnoredFunctionNames = normalizeStringArray(
+    inlayHintsRoot.parameterHintsIgnoredFunctionNames,
+    defaults.inlayHints.parameterHintsIgnoredFunctionNames
+  );
+
   const semanticTokensEnable =
     typeof semanticTokenRoot.enable === "boolean"
       ? semanticTokenRoot.enable
@@ -302,6 +362,16 @@ export function normalizeSettings(raw: unknown): OpenplanetLanguageServerSetting
       enable: completionEnable,
       namespaces: completionNamespaces,
       maxItems: completionMaxItems
+    },
+    inlayHints: {
+      enable: inlayHintsEnable,
+      parameterHintsForConstants,
+      parameterHintsForComplexExpressions,
+      parameterReferenceHints,
+      parameterHintsForSingleParameterFunctions,
+      typeHintsForAutos,
+      parameterHintsIgnoredParameterNames,
+      parameterHintsIgnoredFunctionNames
     },
     semanticTokens: {
       enable: semanticTokensEnable,

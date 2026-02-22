@@ -2,7 +2,7 @@
   "name": "openplanet-angelscript-languageserver",
   "displayName": "Openplanet AngelScript Language Server",
   "description": "Language Server features for Openplanet AngelScript. Pair with openplanet-angelscript-syntax for fast baseline highlighting.",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "publisher": "ar",
   "license": "Unlicense",
   "engines": {
@@ -38,6 +38,18 @@
       {
         "command": "openplanetLanguageServer.restartServer",
         "title": "Openplanet Language Server: Restart"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "toggleSuggestionDetails",
+        "key": "right",
+        "when": "textInputFocus && suggestWidgetVisible && suggestWidgetHasFocusedSuggestion && !suggestWidgetDetailsVisible"
+      },
+      {
+        "command": "toggleSuggestionDetails",
+        "key": "left",
+        "when": "textInputFocus && suggestWidgetVisible && suggestWidgetHasFocusedSuggestion && !suggestWidgetDetailsVisible"
       }
     ],
     "configuration": {
@@ -183,6 +195,61 @@
           "minimum": 50,
           "description": "Maximum completion items returned per request."
         },
+        "openplanetLanguageServer.inlayHints.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable inlay hints rendered by the language server."
+        },
+        "openplanetLanguageServer.inlayHints.parameterHintsForConstants": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show parameter name hints when passing a constant literal argument."
+        },
+        "openplanetLanguageServer.inlayHints.parameterHintsForComplexExpressions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show parameter name hints when passing a complex expression as an argument."
+        },
+        "openplanetLanguageServer.inlayHints.parameterReferenceHints": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show parameter name hints when a parameter uses a writable reference mode."
+        },
+        "openplanetLanguageServer.inlayHints.parameterHintsForSingleParameterFunctions": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable parameter name hints for single-parameter calls."
+        },
+        "openplanetLanguageServer.inlayHints.typeHintsForAutos": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inferred type hints next to auto local declarations."
+        },
+        "openplanetLanguageServer.inlayHints.parameterHintsIgnoredParameterNames": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "Object",
+            "FunctionName",
+            "Value",
+            "InValue",
+            "NewValue",
+            "Condition",
+            "Parameters",
+            "Params"
+          ],
+          "description": "Parameters with a name included in this list are ignored for parameter inlay hints."
+        },
+        "openplanetLanguageServer.inlayHints.parameterHintsIgnoredFunctionNames": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Function names included in this list are ignored for parameter inlay hints."
+        },
         "openplanetLanguageServer.semanticTokens.enable": {
           "type": "boolean",
           "default": true,
@@ -191,7 +258,10 @@
         "openplanetLanguageServer.semanticTokens.mode": {
           "type": "string",
           "default": "minimal",
-          "enum": ["minimal", "balanced"],
+          "enum": [
+            "minimal",
+            "balanced"
+          ],
           "description": "Semantic token intensity. minimal keeps syntax highlighter colors dominant; balanced applies broader semantic coloring."
         },
         "openplanetLanguageServer.symbols.enableCoreJson": {
@@ -281,12 +351,22 @@
     "compile": "tsc -p .",
     "watch": "tsc -watch -p .",
     "test": "npm run compile && node out/test/runTests.js",
+    "test:conformance": "npm run compile && node out/test/runConformanceTests.js",
+    "test:conformance:sync-texts": "node scripts/conformance/syncAngelScriptTexts.mjs",
+    "test:conformance:sync-tokens": "node scripts/conformance/syncAngelScriptTokenDefs.mjs",
+    "test:oracle-bootstrap": "node scripts/conformance/bootstrapOracleDataset.mjs",
+    "test:oracle-bootstrap:identifiers": "node scripts/conformance/bootstrapOracleDataset.mjs --identifier-only --max-cases 0",
+    "test:reserved-identifiers": "node scripts/conformance/scanReservedIdentifiers.mjs",
+    "test:oracle-parity": "node scripts/conformance/runOracleParity.mjs",
+    "test:oracle-parity:strict": "node scripts/conformance/runOracleParity.mjs --strict-diagnostic-text",
+    "test:oracle-parity:matrix": "node scripts/conformance/runOracleParityMatrix.mjs",
+    "test:compiler-grade": "node scripts/conformance/runCompilerGradePipeline.mjs",
     "test:integration": "npm run compile && node out/test/runIntegrationTests.js",
     "test:interactive": "npm run compile && node out/test/runInteractiveTests.js",
     "release:check-changelog": "node scripts/release/checkChangelog.mjs",
     "release:package": "npx @vscode/vsce package --no-yarn",
     "release:smoke": "node scripts/release/smokeVsix.mjs",
-    "release:verify": "npm run release:check-changelog && npm run test && npm run test:integration && npm run release:package && npm run release:smoke",
+    "release:verify": "npm run release:check-changelog && npm run test && npm run test:conformance && npm run test:integration && npm run release:package && npm run release:smoke",
     "vscode:prepublish": "npm run compile"
   },
   "dependencies": {

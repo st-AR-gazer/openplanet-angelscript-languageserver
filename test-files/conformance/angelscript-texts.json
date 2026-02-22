@@ -1,0 +1,1381 @@
+{
+  "ts_utc": "2026-02-22T00:36:25.925Z",
+  "source": "https://raw.githubusercontent.com/anjo76/angelscript/master/sdk/angelscript/source/as_texts.h",
+  "total_entries": 313,
+  "groups": {
+    "ABSTRACT": 1,
+    "ACCESSING": 1,
+    "ALL": 1,
+    "AMBIGUOUS": 1,
+    "ARG": 1,
+    "ARGUMENT": 2,
+    "ATTR": 1,
+    "AUTO": 1,
+    "AUTOHANDLE": 1,
+    "BASE": 2,
+    "BOTH": 3,
+    "CANDIDATES": 1,
+    "CANNOT": 21,
+    "CANT": 3,
+    "CHANGE": 1,
+    "CLASS": 1,
+    "COMPILING": 2,
+    "COMPOUND": 3,
+    "d": 2,
+    "DATA": 1,
+    "DECL": 1,
+    "DEF": 2,
+    "DEFAULT": 1,
+    "DELETED": 1,
+    "DERIVED": 1,
+    "DESTRUCTOR": 2,
+    "DISALLOW": 2,
+    "DIVIDE": 2,
+    "DONT": 2,
+    "DUPLICATE": 2,
+    "ELSE": 1,
+    "EMPTY": 2,
+    "ENGINE": 1,
+    "EXCEPTION": 3,
+    "EXPECTED": 13,
+    "EXPR": 3,
+    "EXTERNAL": 2,
+    "EXTRNL": 1,
+    "FAILED": 7,
+    "FIRST": 1,
+    "FLOAT": 1,
+    "FOUND": 1,
+    "FUNC": 1,
+    "FUNCTION": 2,
+    "GC": 2,
+    "GET": 1,
+    "GLOBAL": 1,
+    "HANDLE": 3,
+    "IDENTIFIER": 3,
+    "IF": 1,
+    "ILLEGAL": 7,
+    "INHERITED": 1,
+    "INIT": 1,
+    "INSTANCING": 1,
+    "INSTEAD": 3,
+    "INTERFACE": 2,
+    "INVALID": 18,
+    "LIST": 1,
+    "MEMBER": 1,
+    "METHOD": 5,
+    "MISMATCH": 1,
+    "MISSING": 4,
+    "MIXIN": 4,
+    "MODULE": 1,
+    "MORE": 1,
+    "MULTILINE": 1,
+    "MULTIPLE": 3,
+    "MUST": 2,
+    "NAME": 12,
+    "NAMED": 1,
+    "NAMESPACE": 1,
+    "NO": 14,
+    "NON": 2,
+    "NONTERMINATED": 1,
+    "NOT": 8,
+    "NOTHING": 1,
+    "NULL": 1,
+    "OBJECT": 3,
+    "ONLY": 4,
+    "OPERANDS": 1,
+    "OUT": 1,
+    "OVERLOAD": 1,
+    "PARAMETER": 2,
+    "POS": 1,
+    "POTENTIAL": 1,
+    "POW": 1,
+    "PREV": 3,
+    "PRIVATE": 2,
+    "PROP": 3,
+    "PROPERTY": 7,
+    "PROTECTED": 2,
+    "REF": 8,
+    "RESURRECTING": 1,
+    "RETURN": 1,
+    "s": 6,
+    "SCOPE": 1,
+    "SECTION": 1,
+    "SHARED": 6,
+    "SIGNED": 1,
+    "STACK": 1,
+    "STRINGS": 1,
+    "SWITCH": 2,
+    "SYSTEM": 1,
+    "TEMPLATE": 4,
+    "TMPL": 1,
+    "TOO": 4,
+    "TYPE": 5,
+    "UNBOUND": 1,
+    "UNEXPECTED": 3,
+    "UNINITIALIZED": 1,
+    "UNKNOWN": 1,
+    "UNREACHABLE": 1,
+    "UNRECOGNIZED": 2,
+    "UNUSED": 1,
+    "VALUE": 3,
+    "VARIABLE": 1,
+    "VOID": 1,
+    "WARNINGS": 1,
+    "WHERE": 1,
+    "WHILE": 6
+  },
+  "entries": [
+    {
+      "key": "TXT_ABSTRACT_CLASS_s_CANNOT_BE_INSTANTIATED",
+      "message": "Abstract class '%s' cannot be instantiated"
+    },
+    {
+      "key": "TXT_ACCESSING_PRIVATE_PROP_s",
+      "message": "Accessing private property '%s' of parent class"
+    },
+    {
+      "key": "TXT_ALL_CODE_PATHS_MUST_INIT_MEMBER",
+      "message": "Initialization after return. All code paths must initialize the members"
+    },
+    {
+      "key": "TXT_AMBIGUOUS_SYMBOL_NAME_s",
+      "message": "Ambiguous symbol name '%s'"
+    },
+    {
+      "key": "TXT_ARG_NOT_LVALUE",
+      "message": "Output argument expression is not assignable"
+    },
+    {
+      "key": "TXT_ARGUMENT_TYPE_ERROR_i",
+      "message": "Rejected due to type mismatch at positional parameter %i"
+    },
+    {
+      "key": "TXT_ARGUMENT_TYPE_ERROR_s",
+      "message": "Rejected due to type mismatch on parameter '%s'"
+    },
+    {
+      "key": "TXT_ATTR_s_INFORMED_MULTIPLE_TIMES",
+      "message": "Attribute '%s' informed multiple times"
+    },
+    {
+      "key": "TXT_AUTO_NOT_ALLOWED",
+      "message": "Auto is not allowed here"
+    },
+    {
+      "key": "TXT_AUTOHANDLE_CANNOT_BE_USED_FOR_NOCOUNT",
+      "message": "Autohandles cannot be used with types that have been registered with NOCOUNT"
+    },
+    {
+      "key": "TXT_BASE_DOESNT_HAVE_CPY_CONSTR_OR_DEF_CONSTR",
+      "message": "Base class doesn't have copy constructor or default constructor and assign operator. Make explicit call to base constructor"
+    },
+    {
+      "key": "TXT_BASE_DOESNT_HAVE_DEF_CONSTR",
+      "message": "Base class doesn't have default constructor. Make explicit call to base constructor"
+    },
+    {
+      "key": "TXT_BOTH_CONDITIONS_MUST_CALL_CONSTRUCTOR",
+      "message": "Both conditions must call constructor"
+    },
+    {
+      "key": "TXT_BOTH_CONDITIONS_MUST_INIT_MEMBER_s",
+      "message": "Both conditions must initialize member '%s'"
+    },
+    {
+      "key": "TXT_BOTH_MUST_BE_SAME",
+      "message": "Can't find unambiguous implicit conversion to make both expressions have the same type"
+    },
+    {
+      "key": "TXT_CANDIDATES_ARE",
+      "message": "Candidates are:"
+    },
+    {
+      "key": "TXT_CANNOT_ACCESS_NON_STATIC_MEMBER_s",
+      "message": "Cannot access non-static member '%s' like this"
+    },
+    {
+      "key": "TXT_CANNOT_CALL_CONSTRUCTOR_IN_LOOPS",
+      "message": "Can't call a constructor in loops"
+    },
+    {
+      "key": "TXT_CANNOT_CALL_CONSTRUCTOR_IN_SWITCH",
+      "message": "Can't call a constructor in switch"
+    },
+    {
+      "key": "TXT_CANNOT_CALL_CONSTRUCTOR_TWICE",
+      "message": "Can't call a constructor multiple times"
+    },
+    {
+      "key": "TXT_CANNOT_CREATE_DELEGATE",
+      "message": "Can't create delegate"
+    },
+    {
+      "key": "TXT_CANNOT_CREATE_DELEGATE_FOR_NOREF_TYPES",
+      "message": "Can't create delegate for types that do not support handles"
+    },
+    {
+      "key": "TXT_CANNOT_DEFINE_FUNC_THAT_IS_DELETED",
+      "message": "Conflict with explicit declaration of function and deleted function"
+    },
+    {
+      "key": "TXT_CANNOT_DELETE_NON_AUTO_FUNC",
+      "message": "Cannot flag function that will not be auto generated as deleted"
+    },
+    {
+      "key": "TXT_CANNOT_FORM_ARRAY_OF_s",
+      "message": "Can't form arrays of subtype '%s'"
+    },
+    {
+      "key": "TXT_CANNOT_IMPLEMENT_SELF",
+      "message": "Can't implement itself, or another interface that implements this interface"
+    },
+    {
+      "key": "TXT_CANNOT_IMPLICITLY_CALL_EXPLICIT_COPY_CONSTR",
+      "message": "Can't implicitly call explicit copy constructor"
+    },
+    {
+      "key": "TXT_CANNOT_INHERIT_FROM_MULTIPLE_CLASSES",
+      "message": "Can't inherit from multiple classes"
+    },
+    {
+      "key": "TXT_CANNOT_INHERIT_FROM_s_FINAL",
+      "message": "Can't inherit from class '%s' marked as final"
+    },
+    {
+      "key": "TXT_CANNOT_INHERIT_FROM_SELF",
+      "message": "Can't inherit from itself, or another class that inherits from this class"
+    },
+    {
+      "key": "TXT_CANNOT_INIT_MEMBERS_IN_LOOPS",
+      "message": "Can't initialize the members in loops"
+    },
+    {
+      "key": "TXT_CANNOT_INIT_MEMBERS_IN_SWITCH",
+      "message": "Can't initialize the members in switch"
+    },
+    {
+      "key": "TXT_CANNOT_PASS_CLASS_METHOD_AS_ARG",
+      "message": "Can't pass class method as arg directly. Use a delegate object instead"
+    },
+    {
+      "key": "TXT_CANNOT_PASS_TYPE_s_BY_VAL",
+      "message": "Can't pass type '%s' by value unless the application type is informed in the registration"
+    },
+    {
+      "key": "TXT_CANNOT_RESOLVE_AUTO",
+      "message": "Unable to resolve auto type"
+    },
+    {
+      "key": "TXT_CANNOT_RET_TYPE_s_BY_VAL",
+      "message": "Can't return type '%s' by value unless the application type is informed in the registration"
+    },
+    {
+      "key": "TXT_CANNOT_RETURN_REF_TO_LOCAL",
+      "message": "Can't return reference to local value."
+    },
+    {
+      "key": "TXT_CANT_CONSTRUCT_s_USE_REF_CAST",
+      "message": "Can't construct handle '%s'. Use ref cast instead"
+    },
+    {
+      "key": "TXT_CANT_IMPLICITLY_CONVERT_s_TO_s",
+      "message": "Can't implicitly convert from '%s' to '%s'."
+    },
+    {
+      "key": "TXT_CANT_RETURN_VALUE",
+      "message": "Can't return value when return type is 'void'"
+    },
+    {
+      "key": "TXT_CHANGE_SIGN",
+      "message": "Implicit conversion changed sign of value"
+    },
+    {
+      "key": "TXT_CLASS_CANT_BE_FINAL_AND_ABSTRACT",
+      "message": "A class cannot be both abstract and final"
+    },
+    {
+      "key": "TXT_COMPILING_AUTO_s",
+      "message": "Compiling auto generated %s"
+    },
+    {
+      "key": "TXT_COMPILING_s",
+      "message": "Compiling %s"
+    },
+    {
+      "key": "TXT_COMPOUND_ASGN_ON_VALUE_TYPE",
+      "message": "Compound assignments with property accessors on value types are not supported"
+    },
+    {
+      "key": "TXT_COMPOUND_ASGN_REQUIRE_GET_SET",
+      "message": "Compound assignments with property accessors require both get and set accessors"
+    },
+    {
+      "key": "TXT_COMPOUND_ASGN_WITH_IDX_PROP",
+      "message": "Compound assignments with indexed property accessors are not supported"
+    },
+    {
+      "key": "TXT_d_GC_CANNOT_FREE_OBJ_OF_TYPE_s",
+      "message": "Object {%d}. GC cannot destroy an object of type '%s' as it doesn't know how many references to there are."
+    },
+    {
+      "key": "TXT_d_GC_CANNOT_FREE_OBJ_OF_TYPE_s_REF_COUNT_d",
+      "message": "Object {%d}. GC cannot destroy an object of type '%s' as it can't see all references. Current ref count is %d."
+    },
+    {
+      "key": "TXT_DATA_TYPE_CANT_BE_s",
+      "message": "Data type can't be '%s'"
+    },
+    {
+      "key": "TXT_DECL_IN_SWITCH",
+      "message": "Variables cannot be declared in switch cases, except inside statement blocks"
+    },
+    {
+      "key": "TXT_DEF_ARG_MISSING_IN_FUNC_s",
+      "message": "All subsequent parameters after the first default value must have default values in function '%s'"
+    },
+    {
+      "key": "TXT_DEF_ARG_TYPE_DOESNT_MATCH",
+      "message": "The type of the default argument expression doesn't match the function parameter type"
+    },
+    {
+      "key": "TXT_DEFAULT_MUST_BE_LAST",
+      "message": "The default case must be the last one"
+    },
+    {
+      "key": "TXT_DELETED_FUNC_CANT_HAVE_IMPL",
+      "message": "Deleted functions cannot have implementation"
+    },
+    {
+      "key": "TXT_DERIVED_METHOD_MUST_HAVE_SAME_RETTYPE_s",
+      "message": "The method in the derived class must have the same return type as in the base class: '%s'"
+    },
+    {
+      "key": "TXT_DESTRUCTOR_MAY_NOT_HAVE_PARM",
+      "message": "The destructor must not have any parameters"
+    },
+    {
+      "key": "TXT_DESTRUCTOR_s_s_NAME_ERROR",
+      "message": "The name of the destructor '%s::~%s' must be the same as the class"
+    },
+    {
+      "key": "TXT_DISALLOW_ASSIGN_ON_REF_TYPE",
+      "message": "Value assignment on reference types is not allowed. Did you mean to do a handle assignment?"
+    },
+    {
+      "key": "TXT_DISALLOW_COMPOUND_ASSIGN_ON_REF_TYPE",
+      "message": "Compound assignment on reference types is not allowed"
+    },
+    {
+      "key": "TXT_DIVIDE_BY_ZERO",
+      "message": "Divide by zero"
+    },
+    {
+      "key": "TXT_DIVIDE_OVERFLOW",
+      "message": "Overflow in integer division"
+    },
+    {
+      "key": "TXT_DONT_SUPPORT_RET_TYPE_s_BY_VAL",
+      "message": "Don't support returning type '%s' by value from application in native calling convention on this platform"
+    },
+    {
+      "key": "TXT_DONT_SUPPORT_TYPE_s_BY_VAL",
+      "message": "Don't support passing type '%s' by value to application in native calling convention on this platform"
+    },
+    {
+      "key": "TXT_DUPLICATE_NAMED_ARGUMENT_s",
+      "message": "Duplicate named argument '%s'"
+    },
+    {
+      "key": "TXT_DUPLICATE_SWITCH_CASE",
+      "message": "Duplicate switch case"
+    },
+    {
+      "key": "TXT_ELSE_WITH_EMPTY_STATEMENT",
+      "message": "Else with empty statement"
+    },
+    {
+      "key": "TXT_EMPTY_LIST_ELEMENT_IS_NOT_ALLOWED",
+      "message": "Empty list element is not allowed"
+    },
+    {
+      "key": "TXT_EMPTY_SWITCH",
+      "message": "Empty switch statement"
+    },
+    {
+      "key": "TXT_ENGINE_REF_COUNT_ERROR_DURING_SHUTDOWN",
+      "message": "Uh oh! The engine's reference count is increasing while it is being destroyed. Make sure references needed for clean-up are immediately released"
+    },
+    {
+      "key": "TXT_EXCEPTION_CAUGHT",
+      "message": "Caught an exception from the application"
+    },
+    {
+      "key": "TXT_EXCEPTION_IN_NESTED_CALL",
+      "message": "An exception occurred in a nested call"
+    },
+    {
+      "key": "TXT_EXCEPTION_s_IN_s",
+      "message": "Exception '%s' in '%s'"
+    },
+    {
+      "key": "TXT_EXPECTED_CONSTANT",
+      "message": "Expected constant"
+    },
+    {
+      "key": "TXT_EXPECTED_DATA_TYPE",
+      "message": "Expected data type"
+    },
+    {
+      "key": "TXT_EXPECTED_EXPRESSION_VALUE",
+      "message": "Expected expression value"
+    },
+    {
+      "key": "TXT_EXPECTED_IDENTIFIER",
+      "message": "Expected identifier"
+    },
+    {
+      "key": "TXT_EXPECTED_LIST",
+      "message": "Expected a list enclosed by { } to match pattern"
+    },
+    {
+      "key": "TXT_EXPECTED_METHOD_OR_PROPERTY",
+      "message": "Expected method or property"
+    },
+    {
+      "key": "TXT_EXPECTED_ONE_OF",
+      "message": "Expected one of: "
+    },
+    {
+      "key": "TXT_EXPECTED_OPERATOR",
+      "message": "Expected operator"
+    },
+    {
+      "key": "TXT_EXPECTED_POST_OPERATOR",
+      "message": "Expected post operator"
+    },
+    {
+      "key": "TXT_EXPECTED_PRE_OPERATOR",
+      "message": "Expected pre operator"
+    },
+    {
+      "key": "TXT_EXPECTED_s",
+      "message": "Expected '%s'"
+    },
+    {
+      "key": "TXT_EXPECTED_s_OR_s",
+      "message": "Expected '%s' or '%s'"
+    },
+    {
+      "key": "TXT_EXPECTED_STRING",
+      "message": "Expected string"
+    },
+    {
+      "key": "TXT_EXPR_DOESNT_EVAL_TO_FUNC",
+      "message": "Expression doesn't evaluate to a function"
+    },
+    {
+      "key": "TXT_EXPR_MUST_BE_BOOL_s",
+      "message": "Expression must be of boolean type, instead found '%s'"
+    },
+    {
+      "key": "TXT_EXPR_s_IS_DATA_TYPE",
+      "message": "Expression '%s' is a data type"
+    },
+    {
+      "key": "TXT_EXTERNAL_SHARED_s_CANNOT_REDEF",
+      "message": "External shared entity '%s' cannot redefine the original entity"
+    },
+    {
+      "key": "TXT_EXTERNAL_SHARED_s_NOT_FOUND",
+      "message": "External shared entity '%s' not found"
+    },
+    {
+      "key": "TXT_EXTRNL_REF_TO_MODULE_s",
+      "message": "There is an external reference to an object in module '%s', preventing it from being deleted"
+    },
+    {
+      "key": "TXT_FAILED_IN_FUNC_s_s_d",
+      "message": "Failed in call to function '%s' (Code: %s, %d)"
+    },
+    {
+      "key": "TXT_FAILED_IN_FUNC_s_WITH_s_AND_s_s_d",
+      "message": "Failed in call to function '%s' with '%s' and '%s' (Code: %s, %d)"
+    },
+    {
+      "key": "TXT_FAILED_IN_FUNC_s_WITH_s_s_d",
+      "message": "Failed in call to function '%s' with '%s' (Code: %s, %d)"
+    },
+    {
+      "key": "TXT_FAILED_READ_SUBTYPE_OF_TEMPLATE_s",
+      "message": "Failed to read subtype of template type '%s'"
+    },
+    {
+      "key": "TXT_FAILED_TO_COMPILE_DEF_ARG_d_IN_FUNC_s",
+      "message": "Failed while compiling default arg for parameter %d in function '%s'"
+    },
+    {
+      "key": "TXT_FAILED_TO_CREATE_TEMP_OBJ",
+      "message": "Previous error occurred while attempting to create a temporary copy of object"
+    },
+    {
+      "key": "TXT_FAILED_TO_INITIALIZE_s",
+      "message": "Failed to initialize global variable '%s'"
+    },
+    {
+      "key": "TXT_FIRST_PARAM_MUST_BE_REF_FOR_TEMPLATE_FACTORY",
+      "message": "First parameter to template factory must be a reference. This will be used to pass the object type of the template"
+    },
+    {
+      "key": "TXT_FLOAT_CONV_TO_INT_CAUSE_TRUNC",
+      "message": "Float value truncated in implicit conversion to integer"
+    },
+    {
+      "key": "TXT_FOUND_MULTIPLE_ENUM_VALUES",
+      "message": "Found multiple matching enum values"
+    },
+    {
+      "key": "TXT_FUNC_s_RELEASED_BEFORE_CLEANUP",
+      "message": "The engine was shutdown before the context released. Function '%s' cannot be cleaned up"
+    },
+    {
+      "key": "TXT_FUNCTION_ALREADY_EXIST",
+      "message": "A function with the same name and parameters already exists"
+    },
+    {
+      "key": "TXT_FUNCTION_s_NOT_FOUND",
+      "message": "Function '%s' not found"
+    },
+    {
+      "key": "TXT_GC_RECEIVED_NULL_PTR",
+      "message": "AddScriptObjectToGC called with null pointer"
+    },
+    {
+      "key": "TXT_GC_REQUIRE_ADD_REL_GC_BEHAVIOUR",
+      "message": "A garbage collected ref type must have the addref, release, and all gc behaviours"
+    },
+    {
+      "key": "TXT_GET_SET_ACCESSOR_TYPE_MISMATCH_FOR_s",
+      "message": "The property '%s' has mismatching types for the get and set accessors"
+    },
+    {
+      "key": "TXT_GLOBAL_VARS_NOT_ALLOWED",
+      "message": "Global variables have been disabled by the application"
+    },
+    {
+      "key": "TXT_HANDLE_ASSIGN_ON_NON_HANDLE_PROP",
+      "message": "It is not allowed to perform a handle assignment on a non-handle property"
+    },
+    {
+      "key": "TXT_HANDLE_COMPARISON",
+      "message": "The operand is implicitly converted to handle in order to compare them"
+    },
+    {
+      "key": "TXT_HANDLE_OF_HANDLE_IS_NOT_ALLOWED",
+      "message": "Handle to handle is not allowed"
+    },
+    {
+      "key": "TXT_IDENTIFIER_s_NOT_DATA_TYPE",
+      "message": "Identifier '%s' is not a data type"
+    },
+    {
+      "key": "TXT_IDENTIFIER_s_NOT_DATA_TYPE_IN_GLOBAL_NS",
+      "message": "Identifier '%s' is not a data type in global namespace"
+    },
+    {
+      "key": "TXT_IDENTIFIER_s_NOT_DATA_TYPE_IN_NS_s",
+      "message": "Identifier '%s' is not a data type in namespace '%s' or parent"
+    },
+    {
+      "key": "TXT_IF_WITH_EMPTY_STATEMENT",
+      "message": "If with empty statement"
+    },
+    {
+      "key": "TXT_ILLEGAL_BEHAVIOUR_FOR_TYPE",
+      "message": "The behaviour is not compatible with the type"
+    },
+    {
+      "key": "TXT_ILLEGAL_MEMBER_TYPE",
+      "message": "Illegal member type"
+    },
+    {
+      "key": "TXT_ILLEGAL_OPERATION",
+      "message": "Illegal operation on this datatype"
+    },
+    {
+      "key": "TXT_ILLEGAL_OPERATION_ON_s",
+      "message": "Illegal operation on '%s'"
+    },
+    {
+      "key": "TXT_ILLEGAL_RETURN_BY_VALUE_FOR_s",
+      "message": "Illegal return by value for '%s' in type cast"
+    },
+    {
+      "key": "TXT_ILLEGAL_TARGET_TYPE_FOR_REF_CAST",
+      "message": "Illegal target type for reference cast"
+    },
+    {
+      "key": "TXT_ILLEGAL_VARIABLE_NAME_s",
+      "message": "Illegal variable name '%s'."
+    },
+    {
+      "key": "TXT_INHERITED_PRIVATE_PROP_ACCESS_s",
+      "message": "Illegal access to inherited private property '%s'"
+    },
+    {
+      "key": "TXT_INIT_LIST_CANNOT_BE_USED_WITH_s",
+      "message": "Initialization lists cannot be used with '%s'"
+    },
+    {
+      "key": "TXT_INSTANCING_INVLD_TMPL_TYPE_s_s",
+      "message": "Attempting to instantiate invalid template type '%s<%s>'"
+    },
+    {
+      "key": "TXT_INSTEAD_FOUND_IDENTIFIER_s",
+      "message": "Instead found identifier '%s'"
+    },
+    {
+      "key": "TXT_INSTEAD_FOUND_KEYWORD_s",
+      "message": "Instead found reserved keyword '%s'"
+    },
+    {
+      "key": "TXT_INSTEAD_FOUND_s",
+      "message": "Instead found '%s'"
+    },
+    {
+      "key": "TXT_INTERFACE_CAN_ONLY_IMPLEMENT_INTERFACE",
+      "message": "Interfaces can only implement other interfaces"
+    },
+    {
+      "key": "TXT_INTERFACE_s_CANNOT_BE_INSTANTIATED",
+      "message": "Interface '%s' cannot be instantiated"
+    },
+    {
+      "key": "TXT_INVALID_BREAK",
+      "message": "Invalid 'break'"
+    },
+    {
+      "key": "TXT_INVALID_BYTECODE_d",
+      "message": "LoadByteCode failed. The bytecode is invalid. Number of bytes read from stream: %d"
+    },
+    {
+      "key": "TXT_INVALID_CALLING_CONVENTION",
+      "message": "Invalid calling convention"
+    },
+    {
+      "key": "TXT_INVALID_CHAR_LITERAL",
+      "message": "Invalid character literal"
+    },
+    {
+      "key": "TXT_INVALID_CONFIGURATION",
+      "message": "Invalid configuration. Verify the registered application interface."
+    },
+    {
+      "key": "TXT_INVALID_CONTINUE",
+      "message": "Invalid 'continue'"
+    },
+    {
+      "key": "TXT_INVALID_ESCAPE_SEQUENCE",
+      "message": "Invalid escape sequence"
+    },
+    {
+      "key": "TXT_INVALID_EXPRESSION_AMBIGUOUS_NAME",
+      "message": "Invalid expression: ambiguous name"
+    },
+    {
+      "key": "TXT_INVALID_EXPRESSION_LAMBDA",
+      "message": "Invalid expression: stand-alone anonymous function"
+    },
+    {
+      "key": "TXT_INVALID_OP_ON_METHOD",
+      "message": "Invalid operation on method"
+    },
+    {
+      "key": "TXT_INVALID_REF_PROP_ACCESS",
+      "message": "Invalid reference. Property accessors cannot be used in combined read/write operations"
+    },
+    {
+      "key": "TXT_INVALID_SCOPE",
+      "message": "Invalid scope resolution"
+    },
+    {
+      "key": "TXT_INVALID_SIG_FOR_VIRTPROP",
+      "message": "Invalid signature for virtual property"
+    },
+    {
+      "key": "TXT_INVALID_TYPE",
+      "message": "Invalid type"
+    },
+    {
+      "key": "TXT_INVALID_UNICODE_FORMAT_EXPECTED_d",
+      "message": "Invalid unicode escape sequence, expected %d hex digits"
+    },
+    {
+      "key": "TXT_INVALID_UNICODE_SEQUENCE_IN_SRC",
+      "message": "Invalid unicode sequence in source"
+    },
+    {
+      "key": "TXT_INVALID_UNICODE_VALUE",
+      "message": "Invalid unicode code point"
+    },
+    {
+      "key": "TXT_INVALID_USE_OF_NAMED_ARGS",
+      "message": "Invalid use of named arguments"
+    },
+    {
+      "key": "TXT_LIST_FACTORY_EXPECTS_1_REF_PARAM",
+      "message": "List factory expects only one reference parameter. The pointer to the initialization buffer will be passed in this parameter"
+    },
+    {
+      "key": "TXT_MEMBER_s_ACCESSED_BEFORE_INIT",
+      "message": "The member '%s' is accessed before the initialization"
+    },
+    {
+      "key": "TXT_METHOD_CANNOT_OVERRIDE_s",
+      "message": "Method '%s' declared as final and cannot be overridden"
+    },
+    {
+      "key": "TXT_METHOD_CANT_HAVE_NAME_OF_CLASS",
+      "message": "The method cannot be named with the class name"
+    },
+    {
+      "key": "TXT_METHOD_s_DOES_NOT_OVERRIDE",
+      "message": "Method '%s' marked as override but does not replace any base class or interface method"
+    },
+    {
+      "key": "TXT_METHOD_s_NOT_PART_OF_OBJECT_s",
+      "message": "Method '%s' is not part of object '%s'"
+    },
+    {
+      "key": "TXT_METHOD_s_s_HAS_NO_RETURN_TYPE",
+      "message": "Method '%s::%s' is missing the return type, nor is it the same name as object to be a constructor"
+    },
+    {
+      "key": "TXT_MISMATCH_IN_VALUE_ASSIGN",
+      "message": "Mismatching types in value assignment"
+    },
+    {
+      "key": "TXT_MISSING_ARGUMENT_s",
+      "message": "Rejected due to named parameter '%s' missing"
+    },
+    {
+      "key": "TXT_MISSING_DEFINITION_OF_s",
+      "message": "Missing definition of '%s'"
+    },
+    {
+      "key": "TXT_MISSING_IMPLEMENTATION_OF_s",
+      "message": "Missing implementation of '%s'"
+    },
+    {
+      "key": "TXT_MISSING_OR_INVALID_DEFINITON_OF_s",
+      "message": "Missing or invalid definition of '%s'"
+    },
+    {
+      "key": "TXT_MIXIN_CANNOT_BE_DECLARED_AS_s",
+      "message": "Mixin class cannot be declared as '%s'"
+    },
+    {
+      "key": "TXT_MIXIN_CANNOT_HAVE_CHILD_TYPES",
+      "message": "Mixin classes cannot have child types"
+    },
+    {
+      "key": "TXT_MIXIN_CANNOT_HAVE_CONSTRUCTOR",
+      "message": "Mixin classes cannot have constructors or destructors"
+    },
+    {
+      "key": "TXT_MIXIN_CLASS_CANNOT_INHERIT",
+      "message": "Mixin class cannot inherit from classes"
+    },
+    {
+      "key": "TXT_MODULE_IS_IN_USE",
+      "message": "The module is still in use and cannot be rebuilt. Discard it and request another module"
+    },
+    {
+      "key": "TXT_MORE_THAN_ONE_MATCHING_OP",
+      "message": "Found more than one matching operator"
+    },
+    {
+      "key": "TXT_MULTILINE_STRINGS_NOT_ALLOWED",
+      "message": "Multiline strings are not allowed in this application"
+    },
+    {
+      "key": "TXT_MULTIPLE_MATCHING_SIGNATURES_TO_s",
+      "message": "Multiple matching signatures to '%s'"
+    },
+    {
+      "key": "TXT_MULTIPLE_PROP_GET_ACCESSOR_FOR_s",
+      "message": "Found multiple get accessors for property '%s'"
+    },
+    {
+      "key": "TXT_MULTIPLE_PROP_SET_ACCESSOR_FOR_s",
+      "message": "Found multiple set accessors for property '%s'"
+    },
+    {
+      "key": "TXT_MUST_BE_OBJECT",
+      "message": "Only objects have constructors"
+    },
+    {
+      "key": "TXT_MUST_RETURN_VALUE",
+      "message": "Must return a value"
+    },
+    {
+      "key": "TXT_NAME_CONFLICT_s_ALREADY_USED",
+      "message": "Name conflict. '%s' is already used."
+    },
+    {
+      "key": "TXT_NAME_CONFLICT_s_EXTENDED_TYPE",
+      "message": "Name conflict. '%s' is an extended data type."
+    },
+    {
+      "key": "TXT_NAME_CONFLICT_s_GLOBAL_PROPERTY",
+      "message": "Name conflict. '%s' is a global property."
+    },
+    {
+      "key": "TXT_NAME_CONFLICT_s_INTF",
+      "message": "Name conflict. '%s' is an interface."
+    },
+    {
+      "key": "TXT_NAME_CONFLICT_s_IS_FUNCDEF",
+      "message": "Name conflict. '%s' is a funcdef."
+    },
+    {
+      "key": "TXT_NAME_CONFLICT_s_IS_FUNCTION",
+      "message": "Name conflict. '%s' is a global function."
+    },
+    {
+      "key": "TXT_NAME_CONFLICT_s_IS_MIXIN",
+      "message": "Name conflict. '%s' is a mixin class."
+    },
+    {
+      "key": "TXT_NAME_CONFLICT_s_IS_NAMED_TYPE",
+      "message": "Name conflict. '%s' is a named type."
+    },
+    {
+      "key": "TXT_NAME_CONFLICT_s_IS_VIRTPROP",
+      "message": "Name conflict. '%s' is a virtual property."
+    },
+    {
+      "key": "TXT_NAME_CONFLICT_s_METHOD",
+      "message": "Name conflict. '%s' is a class method."
+    },
+    {
+      "key": "TXT_NAME_CONFLICT_s_OBJ_PROPERTY",
+      "message": "Name conflict. '%s' is an object property."
+    },
+    {
+      "key": "TXT_NAME_CONFLICT_s_STRUCT",
+      "message": "Name conflict. '%s' is a class."
+    },
+    {
+      "key": "TXT_NAMED_ARGS_WITH_OLD_SYNTAX",
+      "message": "Detected named argument with old syntax"
+    },
+    {
+      "key": "TXT_NAMESPACE_s_DOESNT_EXIST",
+      "message": "Namespace '%s' doesn't exist."
+    },
+    {
+      "key": "TXT_NO_APPROPRIATE_INDEX_OPERATOR",
+      "message": "No appropriate indexing operator found"
+    },
+    {
+      "key": "TXT_NO_APPROPRIATE_OPEQUALS",
+      "message": "No appropriate opEquals method found"
+    },
+    {
+      "key": "TXT_NO_APPROPRIATE_OPHNDLASSIGN_s",
+      "message": "No appropriate opHndlAssign method found in '%s' for handle assignment"
+    },
+    {
+      "key": "TXT_NO_CONVERSION_s_TO_MATH_TYPE",
+      "message": "No conversion from '%s' to math type available."
+    },
+    {
+      "key": "TXT_NO_CONVERSION_s_TO_s",
+      "message": "No conversion from '%s' to '%s' available."
+    },
+    {
+      "key": "TXT_NO_COPY_CONSTRUCTOR_FOR_s",
+      "message": "No copy constructor for object of type '%s'."
+    },
+    {
+      "key": "TXT_NO_DEFAULT_ARRAY_TYPE",
+      "message": "The application doesn't support the default array type."
+    },
+    {
+      "key": "TXT_NO_DEFAULT_CONSTRUCTOR_FOR_s",
+      "message": "No default constructor for object of type '%s'."
+    },
+    {
+      "key": "TXT_NO_DEFAULT_COPY_OP_FOR_s",
+      "message": "No appropriate opAssign method found in '%s' for value assignment"
+    },
+    {
+      "key": "TXT_NO_JIT_IN_FUNC_s",
+      "message": "Function '%s' appears to have been compiled without JIT entry points"
+    },
+    {
+      "key": "TXT_NO_MATCHING_OP_FOUND_FOR_TYPE_s",
+      "message": "No matching operator that takes the type '%s' found"
+    },
+    {
+      "key": "TXT_NO_MATCHING_OP_FOUND_FOR_TYPES_s_AND_s",
+      "message": "No matching operator that takes the types '%s' and '%s' found"
+    },
+    {
+      "key": "TXT_NO_MATCHING_SIGNATURES_TO_s",
+      "message": "No matching signatures to '%s'"
+    },
+    {
+      "key": "TXT_NO_MATCHING_SYMBOL_s",
+      "message": "No matching symbol '%s'"
+    },
+    {
+      "key": "TXT_NON_CONST_METHOD_ON_CONST_OBJ",
+      "message": "Non-const method call on read-only object reference"
+    },
+    {
+      "key": "TXT_NON_POD_REQUIRE_CONSTR_DESTR_BEHAVIOUR",
+      "message": "A non-pod value type must have at least one constructor and the destructor behaviours"
+    },
+    {
+      "key": "TXT_NONTERMINATED_STRING",
+      "message": "Non-terminated string literal"
+    },
+    {
+      "key": "TXT_NOT_A_FUNC_s_IS_TYPE_s",
+      "message": "Expression doesn't form a function call. '%s' evaluates to the non-function type '%s'"
+    },
+    {
+      "key": "TXT_NOT_ALL_PATHS_RETURN",
+      "message": "Not all paths return a value"
+    },
+    {
+      "key": "TXT_NOT_ENOUGH_ARGUMENTS",
+      "message": "Rejected due to not enough parameters"
+    },
+    {
+      "key": "TXT_NOT_ENOUGH_VALUES_FOR_LIST",
+      "message": "Not enough values to match pattern"
+    },
+    {
+      "key": "TXT_NOT_EXACT",
+      "message": "Implicit conversion of value is not exact"
+    },
+    {
+      "key": "TXT_NOT_LVALUE",
+      "message": "Expression is not an l-value"
+    },
+    {
+      "key": "TXT_NOT_VALID_LVALUE",
+      "message": "Not a valid lvalue"
+    },
+    {
+      "key": "TXT_NOT_VALID_REFERENCE",
+      "message": "Not a valid reference"
+    },
+    {
+      "key": "TXT_NOTHING_WAS_BUILT",
+      "message": "Nothing was built in the module"
+    },
+    {
+      "key": "TXT_NULL_POINTER_ACCESS",
+      "message": "Null pointer access"
+    },
+    {
+      "key": "TXT_OBJECT_DOESNT_SUPPORT_INDEX_OP",
+      "message": "Type '%s' doesn't support the indexing operator"
+    },
+    {
+      "key": "TXT_OBJECT_HANDLE_NOT_SUPPORTED",
+      "message": "Object handle is not supported for this type"
+    },
+    {
+      "key": "TXT_OBJECT_TYPE_s_DOESNT_EXIST",
+      "message": "Object type '%s' doesn't exist"
+    },
+    {
+      "key": "TXT_ONLY_OBJECTS_MAY_USE_REF_INOUT",
+      "message": "Only object types that support object handles can use &inout. Use &in or &out instead"
+    },
+    {
+      "key": "TXT_ONLY_ONE_ARGUMENT_IN_CAST",
+      "message": "A cast operator has one argument"
+    },
+    {
+      "key": "TXT_ONLY_ONE_FUNCTION_ALLOWED",
+      "message": "The code must contain one and only one function"
+    },
+    {
+      "key": "TXT_ONLY_ONE_VARIABLE_ALLOWED",
+      "message": "The code must contain one and only one global variable"
+    },
+    {
+      "key": "TXT_OPERANDS_MUST_BE_HANDLES",
+      "message": "Both operands must be handles when comparing identity"
+    },
+    {
+      "key": "TXT_OUT_OF_BOUNDS",
+      "message": "Out of range"
+    },
+    {
+      "key": "TXT_OVERLOAD_CONFLICTS_DUE_TO_DEFAULT_ARGS",
+      "message": "The overloaded functions are identical on initial parameters without default arguments"
+    },
+    {
+      "key": "TXT_PARAMETER_ALREADY_DECLARED",
+      "message": "Parameter already declared"
+    },
+    {
+      "key": "TXT_PARAMETER_CANT_BE_s",
+      "message": "Parameter type can't be '%s', because the type cannot be instantiated."
+    },
+    {
+      "key": "TXT_POS_ARG_AFTER_NAMED_ARG",
+      "message": "Positional arguments cannot be passed after named arguments"
+    },
+    {
+      "key": "TXT_POTENTIAL_MATCHING_NON_CONST_METHOD_HIDDEN",
+      "message": "Potentially matching non-const method is hidden on read-only object reference"
+    },
+    {
+      "key": "TXT_POW_OVERFLOW",
+      "message": "Overflow in exponent operation"
+    },
+    {
+      "key": "TXT_PREV_ERROR_WHILE_COMP_LIST_FOR_TYPE_s",
+      "message": "Previous error occurred while attempting to compile initialization list for type '%s'"
+    },
+    {
+      "key": "TXT_PREV_FUNC_IS_NAMED_s_TYPE_IS_d",
+      "message": "The function in previous message is named '%s'. The func type is %d"
+    },
+    {
+      "key": "TXT_PREV_TYPE_IS_NAMED_s",
+      "message": "The builtin type in previous message is named '%s'"
+    },
+    {
+      "key": "TXT_PRIVATE_METHOD_CALL_s",
+      "message": "Illegal call to private method '%s'"
+    },
+    {
+      "key": "TXT_PRIVATE_PROP_ACCESS_s",
+      "message": "Illegal access to private property '%s'"
+    },
+    {
+      "key": "TXT_PROP_ACCESS_s_DOES_NOT_EXPECT_INDEX",
+      "message": "Implemented property accessor '%s' does not expect index argument"
+    },
+    {
+      "key": "TXT_PROP_ACCESS_s_EXPECTS_INDEX",
+      "message": "Implemented property accessor '%s' expects index argument"
+    },
+    {
+      "key": "TXT_PROP_ACCESS_WITH_INDEX_ONE_ARG",
+      "message": "Property accessor with index must have 1 and only 1 index argument"
+    },
+    {
+      "key": "TXT_PROPERTY",
+      "message": "Property"
+    },
+    {
+      "key": "TXT_PROPERTY_ACCESSOR_DISABLED",
+      "message": "Property accessors have been disabled by the application"
+    },
+    {
+      "key": "TXT_PROPERTY_ACCESSOR_MUST_BE_IMPLEMENTED",
+      "message": "Property accessor must be implemented"
+    },
+    {
+      "key": "TXT_PROPERTY_CANT_BE_CONST",
+      "message": "Class properties cannot be declared as const"
+    },
+    {
+      "key": "TXT_PROPERTY_HAS_NO_GET_ACCESSOR",
+      "message": "The property has no get accessor"
+    },
+    {
+      "key": "TXT_PROPERTY_HAS_NO_SET_ACCESSOR",
+      "message": "The property has no set accessor"
+    },
+    {
+      "key": "TXT_PROPERTY_WITHOUT_ACCESSOR",
+      "message": "Virtual property must have at least one get or set accessor"
+    },
+    {
+      "key": "TXT_PROTECTED_METHOD_CALL_s",
+      "message": "Illegal call to protected method '%s'"
+    },
+    {
+      "key": "TXT_PROTECTED_PROP_ACCESS_s",
+      "message": "Illegal access to protected property '%s'"
+    },
+    {
+      "key": "TXT_REF_CANT_BE_RETURNED_DEFERRED_PARAM",
+      "message": "Resulting reference cannot be returned. There are deferred arguments that may invalidate it."
+    },
+    {
+      "key": "TXT_REF_CANT_BE_RETURNED_LOCAL_VARS",
+      "message": "Resulting reference cannot be returned. The expression uses objects that during cleanup may invalidate it."
+    },
+    {
+      "key": "TXT_REF_CANT_BE_TO_LOCAL_VAR",
+      "message": "Resulting reference cannot be returned. Returned references must not refer to local variables."
+    },
+    {
+      "key": "TXT_REF_IS_READ_ONLY",
+      "message": "Reference is read-only"
+    },
+    {
+      "key": "TXT_REF_IS_TEMP",
+      "message": "Reference is temporary"
+    },
+    {
+      "key": "TXT_REF_REQUIRE_ADD_REL_BEHAVIOUR",
+      "message": "A reference type must have the addref and release behaviours"
+    },
+    {
+      "key": "TXT_REF_TYPE_CANT_BE_PASSED_BY_VAL",
+      "message": "Reference types cannot be passed by value in function parameters"
+    },
+    {
+      "key": "TXT_REF_TYPE_CANT_BE_RETURNED_BY_VAL",
+      "message": "Reference types cannot be returned by value from functions"
+    },
+    {
+      "key": "TXT_RESURRECTING_SCRIPTOBJECT_s",
+      "message": "The script object of type '%s' is being resurrected illegally during destruction"
+    },
+    {
+      "key": "TXT_RETURN_CANT_BE_s",
+      "message": "Return type can't be '%s'"
+    },
+    {
+      "key": "TXT_s_ALREADY_DECLARED",
+      "message": "'%s' is already declared"
+    },
+    {
+      "key": "TXT_s_HIDES_VAR_IN_OUTER_SCOPE",
+      "message": "Variable '%s' hides another variable of same name in outer scope"
+    },
+    {
+      "key": "TXT_s_NOT_A_FOREACH_TYPE",
+      "message": "Type '%s' is not valid type for foreach loops"
+    },
+    {
+      "key": "TXT_s_NOT_DECLARED",
+      "message": "'%s' is not declared"
+    },
+    {
+      "key": "TXT_s_NOT_INITIALIZED",
+      "message": "'%s' is not initialized."
+    },
+    {
+      "key": "TXT_s_NOT_MEMBER_OF_s",
+      "message": "'%s' is not a member of '%s'"
+    },
+    {
+      "key": "TXT_SCOPE_REQUIRE_REL_BEHAVIOUR",
+      "message": "A scoped reference type must have the release behaviour"
+    },
+    {
+      "key": "TXT_SECTION_IS_EMPTY",
+      "message": "The script section is empty"
+    },
+    {
+      "key": "TXT_SHARED_CANNOT_ACCESS_NON_SHARED_VAR_s",
+      "message": "Shared code cannot access non-shared global variable '%s'"
+    },
+    {
+      "key": "TXT_SHARED_CANNOT_CALL_NON_SHARED_FUNC_s",
+      "message": "Shared code cannot call non-shared function '%s'"
+    },
+    {
+      "key": "TXT_SHARED_CANNOT_IMPLEMENT_NON_SHARED_s",
+      "message": "Shared type cannot implement non-shared interface '%s'"
+    },
+    {
+      "key": "TXT_SHARED_CANNOT_INHERIT_FROM_NON_SHARED_s",
+      "message": "Shared class cannot inherit from non-shared class '%s'"
+    },
+    {
+      "key": "TXT_SHARED_CANNOT_USE_NON_SHARED_TYPE_s",
+      "message": "Shared code cannot use non-shared type '%s'"
+    },
+    {
+      "key": "TXT_SHARED_s_DOESNT_MATCH_ORIGINAL_s",
+      "message": "Shared type '%s' doesn't match the declaration in module '%s'"
+    },
+    {
+      "key": "TXT_SIGNED_UNSIGNED_MISMATCH",
+      "message": "Signed/Unsigned mismatch"
+    },
+    {
+      "key": "TXT_STACK_OVERFLOW",
+      "message": "Stack overflow"
+    },
+    {
+      "key": "TXT_STRINGS_NOT_RECOGNIZED",
+      "message": "Strings are not recognized by the application"
+    },
+    {
+      "key": "TXT_SWITCH_CASE_MUST_BE_CONSTANT",
+      "message": "Case expressions must be literal constants"
+    },
+    {
+      "key": "TXT_SWITCH_MUST_BE_INTEGRAL",
+      "message": "Switch expressions must be integral numbers"
+    },
+    {
+      "key": "TXT_SYSTEM_FUNCTION",
+      "message": "System function"
+    },
+    {
+      "key": "TXT_TEMPLATE_LIST_FACTORY_EXPECTS_2_REF_PARAMS",
+      "message": "Template list factory expects two reference parameters. The last is the pointer to the initialization buffer"
+    },
+    {
+      "key": "TXT_TEMPLATE_s_ALREADY_GENERATED_CANT_REGISTER",
+      "message": "Cannot register. The template type instance '%s' has already been generated."
+    },
+    {
+      "key": "TXT_TEMPLATE_SUBTYPE_s_DOESNT_EXIST",
+      "message": "Template subtype '%s' doesn't exist"
+    },
+    {
+      "key": "TXT_TEMPLATE_TYPE_s_DOESNT_EXIST",
+      "message": "Template type '%s' doesn't exist"
+    },
+    {
+      "key": "TXT_TMPL_s_EXPECTS_d_SUBTYPES",
+      "message": "Template '%s' expects %d sub type(s)"
+    },
+    {
+      "key": "TXT_TOO_MANY_ARGUMENTS",
+      "message": "Rejected due to too many parameters"
+    },
+    {
+      "key": "TXT_TOO_MANY_JUMP_LABELS",
+      "message": "The function has too many jump labels to handle. Split the function into smaller ones."
+    },
+    {
+      "key": "TXT_TOO_MANY_NESTED_CALLS",
+      "message": "Too many nested calls"
+    },
+    {
+      "key": "TXT_TOO_MANY_VALUES_FOR_LIST",
+      "message": "Too many values to match pattern"
+    },
+    {
+      "key": "TXT_TYPE_s_CANNOT_BE_REFERENCE",
+      "message": "Type '%s' cannot be a reference"
+    },
+    {
+      "key": "TXT_TYPE_s_IS_MISSING_BEHAVIOURS",
+      "message": "Type '%s' is missing behaviours"
+    },
+    {
+      "key": "TXT_TYPE_s_IS_STILL_USED_BY_FUNC_s",
+      "message": "Type '%s' is still used by function '%s'"
+    },
+    {
+      "key": "TXT_TYPE_s_NOT_AVAILABLE_FOR_MODULE",
+      "message": "Type '%s' is not available for this module"
+    },
+    {
+      "key": "TXT_TYPE_s_NOT_TEMPLATE",
+      "message": "Type '%s' is not a template type"
+    },
+    {
+      "key": "TXT_UNBOUND_FUNCTION",
+      "message": "Unbound function called"
+    },
+    {
+      "key": "TXT_UNEXPECTED_END_OF_FILE",
+      "message": "Unexpected end of file"
+    },
+    {
+      "key": "TXT_UNEXPECTED_TOKEN_s",
+      "message": "Unexpected token '%s'"
+    },
+    {
+      "key": "TXT_UNEXPECTED_VAR_DECL",
+      "message": "Unexpected variable declaration"
+    },
+    {
+      "key": "TXT_UNINITIALIZED_GLOBAL_VAR_s",
+      "message": "Use of uninitialized global variable '%s'."
+    },
+    {
+      "key": "TXT_UNKNOWN_SCOPE_s",
+      "message": "Unknown scope '%s'"
+    },
+    {
+      "key": "TXT_UNREACHABLE_CODE",
+      "message": "Unreachable code"
+    },
+    {
+      "key": "TXT_UNRECOGNIZED_BYTE_CODE",
+      "message": "Unrecognized byte code"
+    },
+    {
+      "key": "TXT_UNRECOGNIZED_VIRTUAL_PROPERTY_NODE",
+      "message": "Virtual property contains unrecognized aspect"
+    },
+    {
+      "key": "TXT_UNUSED_SCRIPT_NODE",
+      "message": "Unused script node"
+    },
+    {
+      "key": "TXT_VALUE_GC_REQUIRE_GC_BEHAVIOUR",
+      "message": "A garbage collected value type must have the gc enum references behaviour"
+    },
+    {
+      "key": "TXT_VALUE_TOO_LARGE_FOR_TYPE",
+      "message": "Value is too large for data type"
+    },
+    {
+      "key": "TXT_VALUE_TYPE_MUST_HAVE_SIZE",
+      "message": "A value type must be registered with a non-zero size"
+    },
+    {
+      "key": "TXT_VARIABLE_DECL",
+      "message": "Variable declaration"
+    },
+    {
+      "key": "TXT_VOID_CANT_BE_OPERAND",
+      "message": "Void cannot be an operand in expressions"
+    },
+    {
+      "key": "TXT_WARNINGS_TREATED_AS_ERROR",
+      "message": "Warnings are treated as errors by the application"
+    },
+    {
+      "key": "TXT_WHERE_s_IS_s",
+      "message": "Where '%s' is '%s'"
+    },
+    {
+      "key": "TXT_WHILE_INCLUDING_MIXIN",
+      "message": "Previous error occurred while including mixin"
+    },
+    {
+      "key": "TXT_WHILE_PARSING_ARG_LIST",
+      "message": "While parsing argument list"
+    },
+    {
+      "key": "TXT_WHILE_PARSING_EXPRESSION",
+      "message": "While parsing expression"
+    },
+    {
+      "key": "TXT_WHILE_PARSING_INIT_LIST",
+      "message": "While parsing initialization list"
+    },
+    {
+      "key": "TXT_WHILE_PARSING_NAMESPACE",
+      "message": "While parsing namespace"
+    },
+    {
+      "key": "TXT_WHILE_PARSING_STATEMENT_BLOCK",
+      "message": "While parsing statement block"
+    }
+  ]
+}

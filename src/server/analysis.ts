@@ -21,7 +21,8 @@ import {
   type GrammarFunctionDeclarationNode,
   type GrammarParseError,
   type GrammarProgramNode,
-  type GrammarStatementNode
+  type GrammarStatementNode,
+  type GrammarTypeDeclarationNode
 } from "./grammarPipeline";
 import type { TypeResolutionContext } from "./types";
 
@@ -88,6 +89,8 @@ export interface ImportFunctionDeclaration {
   functionNameStart: number;
   functionNameEnd: number;
   functionNameRange: Range;
+  argsStart: number;
+  argsEnd: number;
   argsText: string;
 }
 
@@ -104,6 +107,14 @@ export interface TypeDeclaration {
   nameRange: Range;
 }
 
+export interface IdentifierDeclaration {
+  id: string;
+  name: string;
+  start: number;
+  end: number;
+  range: Range;
+}
+
 export interface DocumentAnalysis {
   uri: string;
   version: number;
@@ -114,6 +125,7 @@ export interface DocumentAnalysis {
   includes: IncludeDirective[];
   importFunctionDeclarations: ImportFunctionDeclaration[];
   typeDeclarations: TypeDeclaration[];
+  identifierDeclarations: IdentifierDeclaration[];
   functions: FunctionDeclaration[];
   declaredCallableNames: Set<string>;
   functionNameDeclarationOffsets: Set<number>;
@@ -169,7 +181,16 @@ export function analyzeDocument(document: TextDocument): DocumentAnalysis {
     parsedStructure.callableDeclarations,
     document
   );
-  const typeDeclarations = parseTypeDeclarations(parsedStructure.typeDeclarations, document);
+  const typeDeclarations = parseTypeDeclarationsFromGrammarProgram(
+    grammar.program,
+    parsedStructure.typeDeclarations,
+    document
+  );
+  const identifierDeclarations = collectIdentifierDeclarationsFromGrammarProgram(
+    grammar.program,
+    document,
+    text
+  );
   const functions = parseFunctions(
     maskedText,
     parsedStructure.functions,
@@ -195,6 +216,12 @@ export function analyzeDocument(document: TextDocument): DocumentAnalysis {
     for (const localDeclaration of fn.localDeclarations) {
       declarationOffsets.add(localDeclaration.start);
     }
+  }
+  for (const typeDeclaration of typeDeclarations) {
+    declarationOffsets.add(typeDeclaration.start);
+  }
+  for (const declaration of identifierDeclarations) {
+    declarationOffsets.add(declaration.start);
   }
   for (const callableDeclaration of callableDeclarations) {
     declarationOffsets.add(callableDeclaration.start);
@@ -223,6 +250,7 @@ export function analyzeDocument(document: TextDocument): DocumentAnalysis {
     includes,
     importFunctionDeclarations,
     typeDeclarations,
+    identifierDeclarations,
     functions,
     declaredCallableNames,
     functionNameDeclarationOffsets,
@@ -333,6 +361,8 @@ function parseImportFunctionDeclarations(
       functionNameStart,
       functionNameEnd,
       functionNameRange: offsetsToRange(document, functionNameStart, functionNameEnd),
+      argsStart: parsedCallable.openParen + 1,
+      argsEnd: parsedCallable.closeParen,
       argsText
     });
   }
@@ -698,15 +728,16 @@ function parseParametersFromGrammarFunction(
 
   const declarations: VariableDeclaration[] = [];
   for (const parameter of grammarFunction.parameters) {
-    const type = normalizeTypeText(parameter.typeText);
-    if (!type || !parameter.name) {
+    const rawType = parameter.typeText.trim();
+    const normalizedType = normalizeTypeText(rawType);
+    if (!normalizedType || !parameter.name) {
       continue;
     }
 
     declarations.push({
       id: `${document.uri}:${parameter.nameStart}`,
       name: parameter.name,
-      type,
+      type: rawType,
       start: parameter.nameStart,
       end: parameter.nameEnd,
       range: offsetsToRange(document, parameter.nameStart, parameter.nameEnd),
@@ -748,19 +779,20 @@ function collectLocalDeclarationsFromGrammarFunction(
     }
 
     if (statement.kind === "variable-declaration") {
-      const type = normalizeTypeText(statement.typeText);
-      if (!type) {
+      const rawType = statement.typeText.trim();
+      const normalizedType = normalizeTypeText(rawType);
+      if (!normalizedType) {
         return;
       }
 
       for (const declarator of statement.declarators) {
-        if (!declarator.name || isLanguageKeyword(declarator.name)) {
+        if (!declarator.name) {
           continue;
         }
         declarations.push({
           id: `${document.uri}:${declarator.nameStart}`,
           name: declarator.name,
-          type,
+          type: rawType,
           start: declarator.nameStart,
           end: declarator.nameEnd,
           range: offsetsToRange(document, declarator.nameStart, declarator.nameEnd),
@@ -831,20 +863,234 @@ function collectGrammarFunctionDeclarations(
   return declarations;
 }
 
-function parseTypeDeclarations(
+function collectIdentifierDeclarationsFromGrammarProgram(
+  program: GrammarProgramNode,
+  document: TextDocument,
+  text: string
+): IdentifierDeclaration[] {
+  const declarations: IdentifierDeclaration[] = [];
+
+  const pushDeclaration = (name: string, start: number, end: number): void => {
+    if (!name || start < 0 || end <= start) {
+      return;
+    }
+    declarations.push({
+      id: `${document.uri}:${start}`,
+      name,
+      start,
+      end,
+      range: offsetsToRange(document, start, end)
+    });
+  };
+
+  const visitStatement = (statement: GrammarStatementNode): void => {
+    if (statement.kind === "variable-declaration") {
+      for (const declarator of statement.declarators) {
+        pushDeclaration(declarator.name, declarator.nameStart, declarator.nameEnd);
+      }
+      return;
+    }
+
+    if (statement.kind === "block") {
+      for (const nested of statement.statements) {
+        visitStatement(nested);
+      }
+      return;
+    }
+
+    if (statement.kind !== "statement" && statement.body) {
+      visitStatement(statement.body);
+    }
+  };
+
+  const visitDeclaration = (declaration: GrammarDeclarationNode): void => {
+    if (declaration.kind === "function") {
+      pushDeclaration(declaration.name, declaration.nameStart, declaration.nameEnd);
+      for (const parameter of declaration.parameters) {
+        pushDeclaration(parameter.name, parameter.nameStart, parameter.nameEnd);
+      }
+      if (declaration.body) {
+        for (const statement of declaration.body.statements) {
+          visitStatement(statement);
+        }
+      }
+      return;
+    }
+
+    if (declaration.kind === "callable-declaration") {
+      pushDeclaration(declaration.name, declaration.nameStart, declaration.nameEnd);
+      for (const parameter of declaration.parameters) {
+        pushDeclaration(parameter.name, parameter.nameStart, parameter.nameEnd);
+      }
+      return;
+    }
+
+    if (declaration.kind === "namespace") {
+      pushDeclaration(declaration.name, declaration.nameStart, declaration.nameEnd);
+      for (const child of declaration.body) {
+        visitDeclaration(child);
+      }
+      return;
+    }
+
+    if (declaration.kind === "type") {
+      pushDeclaration(declaration.name, declaration.nameStart, declaration.nameEnd);
+      for (const enumLabel of collectEnumLabelDeclarationsFromTypeDeclaration(
+        declaration,
+        text
+      )) {
+        pushDeclaration(enumLabel.name, enumLabel.start, enumLabel.end);
+      }
+      for (const child of declaration.body) {
+        visitDeclaration(child);
+      }
+      return;
+    }
+
+    if (declaration.kind === "using") {
+      return;
+    }
+
+    visitStatement(declaration);
+  };
+
+  for (const declaration of program.declarations) {
+    visitDeclaration(declaration);
+  }
+
+  return dedupeIdentifierDeclarations(declarations.sort((a, b) => a.start - b.start));
+}
+
+function collectEnumLabelDeclarationsFromTypeDeclaration(
+  declaration: GrammarTypeDeclarationNode,
+  text: string
+): Array<{ name: string; start: number; end: number }> {
+  if (declaration.typeKind !== "enum") {
+    return [];
+  }
+
+  const labels: Array<{ name: string; start: number; end: number }> = [];
+  for (const child of declaration.body) {
+    if (child.kind !== "statement") {
+      continue;
+    }
+
+    const statementText = text.slice(child.start, child.end);
+    const segments = splitCommaSeparatedWithOffsets(statementText, child.start);
+    for (const segment of segments) {
+      const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(segment.text);
+      if (!match) {
+        continue;
+      }
+
+      const labelName = match[1];
+      const labelStartInSegment = segment.text.indexOf(labelName);
+      if (labelStartInSegment < 0) {
+        continue;
+      }
+
+      const labelStart = segment.start + labelStartInSegment;
+      labels.push({
+        name: labelName,
+        start: labelStart,
+        end: labelStart + labelName.length
+      });
+    }
+  }
+
+  return labels;
+}
+
+function dedupeIdentifierDeclarations(
+  declarations: IdentifierDeclaration[]
+): IdentifierDeclaration[] {
+  const deduped: IdentifierDeclaration[] = [];
+  const seen = new Set<number>();
+  for (const declaration of declarations) {
+    if (seen.has(declaration.start)) {
+      continue;
+    }
+    seen.add(declaration.start);
+    deduped.push(declaration);
+  }
+  return deduped;
+}
+
+function parseTypeDeclarationsFromGrammarProgram(
+  program: GrammarProgramNode,
   parsedTypes: ParsedTypeNode[],
   document: TextDocument
 ): TypeDeclaration[] {
-  return parsedTypes.map((typeDeclaration) => ({
-    id: `${document.uri}:${typeDeclaration.start}`,
-    name: typeDeclaration.name,
-    fullName: typeDeclaration.fullName,
-    kind: typeDeclaration.kind,
-    start: typeDeclaration.start,
-    end: typeDeclaration.end,
-    range: offsetsToRange(document, typeDeclaration.start, typeDeclaration.end),
-    nameRange: offsetsToRange(document, typeDeclaration.start, typeDeclaration.end)
-  }));
+  const declarations: TypeDeclaration[] = [];
+
+  const visitDeclarations = (
+    nodes: GrammarDeclarationNode[],
+    namespacePath: string
+  ): void => {
+    for (const node of nodes) {
+      if (node.kind === "namespace") {
+        const childNamespace = namespacePath
+          ? `${namespacePath}::${node.name}`
+          : node.name;
+        visitDeclarations(node.body, childNamespace);
+        continue;
+      }
+
+      if (node.kind !== "type") {
+        continue;
+      }
+
+      const fullName = namespacePath
+        ? `${namespacePath}::${node.name}`
+        : node.name;
+      declarations.push({
+        id: `${document.uri}:${node.nameStart}`,
+        name: node.name,
+        fullName,
+        kind: node.typeKind,
+        start: node.start,
+        end: node.end,
+        range: offsetsToRange(document, node.start, node.end),
+        nameRange: offsetsToRange(document, node.nameStart, node.nameEnd)
+      });
+
+      visitDeclarations(node.body, fullName);
+    }
+  };
+
+  visitDeclarations(program.declarations, "");
+  if (declarations.length === 0) {
+    return parsedTypes.map((typeDeclaration) => ({
+      id: `${document.uri}:${typeDeclaration.start}`,
+      name: typeDeclaration.name,
+      fullName: typeDeclaration.fullName,
+      kind: typeDeclaration.kind,
+      start: typeDeclaration.start,
+      end: typeDeclaration.end,
+      range: offsetsToRange(document, typeDeclaration.start, typeDeclaration.end),
+      nameRange: offsetsToRange(document, typeDeclaration.start, typeDeclaration.end)
+    }));
+  }
+
+  const seenStarts = new Set(declarations.map((declaration) => declaration.start));
+  for (const parsedType of parsedTypes) {
+    if (seenStarts.has(parsedType.start)) {
+      continue;
+    }
+
+    declarations.push({
+      id: `${document.uri}:${parsedType.start}`,
+      name: parsedType.name,
+      fullName: parsedType.fullName,
+      kind: parsedType.kind,
+      start: parsedType.start,
+      end: parsedType.end,
+      range: offsetsToRange(document, parsedType.start, parsedType.end),
+      nameRange: offsetsToRange(document, parsedType.start, parsedType.end)
+    });
+  }
+
+  return declarations.sort((a, b) => a.start - b.start);
 }
 
 function parseCallableDeclarations(
@@ -914,9 +1160,8 @@ function parseParameters(
       continue;
     }
 
-    const declarationType = normalizeTypeText(
-      withoutDefault.slice(0, nameIndexInWithoutDefault)
-    );
+    const declarationTypeRaw = withoutDefault.slice(0, nameIndexInWithoutDefault).trim();
+    const declarationType = normalizeTypeText(declarationTypeRaw);
     if (!declarationType) {
       continue;
     }
@@ -931,7 +1176,7 @@ function parseParameters(
     declarations.push({
       id: `${document.uri}:${nameStart}`,
       name: declarationName,
-      type: declarationType,
+      type: declarationTypeRaw,
       start: nameStart,
       end: nameEnd,
       range: offsetsToRange(document, nameStart, nameEnd),
@@ -956,15 +1201,13 @@ function parseLocalDeclarations(
 
   while ((match = localDeclarationPattern.exec(bodyText)) !== null) {
     const fullMatch = match[0];
-    const rawType = normalizeTypeText(match[1]);
+    const rawType = match[1].trim();
+    const normalizedType = normalizeTypeText(rawType);
     const declarationName = match[2];
-    if (!rawType || !declarationName) {
+    if (!normalizedType || !declarationName) {
       continue;
     }
-    if (invalidLocalTypeKeywords.has(rawType)) {
-      continue;
-    }
-    if (isLanguageKeyword(declarationName)) {
+    if (invalidLocalTypeKeywords.has(normalizedType)) {
       continue;
     }
 

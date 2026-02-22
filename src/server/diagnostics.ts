@@ -13,8 +13,10 @@ import {
   getTypeResolutionContextAtPosition,
   resolveVisibleLocalDeclaration
 } from "./analysis";
+import { runBinderPhase } from "./binderPipeline";
 import {
   isIntrinsicCallableIdentifier,
+  isKeywordLikeToken,
   isLanguageKeyword,
   normalizeTypeText
 } from "./language";
@@ -36,14 +38,31 @@ import {
 import type {
   CompletionIndex,
   DiagnosticSettings,
-  ParserSettings
+  ParserSettings,
+  TypeInfo
 } from "./types";
 import { LANGUAGE_SERVER_DIAGNOSTIC_SOURCE } from "./includes";
+import { annotateDiagnosticsWithCompilerText } from "./diagnosticTextParity";
+import { collectParserSyntaxDiagnostics } from "./diagnosticsParser";
+import {
+  collectDuplicateImportDeclarationDiagnostics as collectDuplicateImportDeclarationDiagnosticsFromModule,
+  collectImportDependencyDiagnostics as collectImportDependencyDiagnosticsFromModule
+} from "./diagnosticsImport";
+import {
+  collectInheritanceContractDiagnostics as collectInheritanceContractDiagnosticsFromModule,
+  collectReservedKeywordIdentifierDiagnostics as collectReservedKeywordIdentifierDiagnosticsFromModule,
+  collectVariableShadowingDiagnostics as collectVariableShadowingDiagnosticsFromModule
+} from "./diagnosticsBinder";
+import {
+  collectDefaultArgumentOrderingDiagnostics as collectDefaultArgumentOrderingDiagnosticsFromModule,
+  collectUnknownTypeDiagnostics as collectUnknownTypeDiagnosticsFromModule
+} from "./diagnosticsType";
 
 const caseMismatchCode = "case-mismatch-symbol";
 const unknownSymbolCode = "unknown-symbol";
 const unknownIdentifierCode = "unknown-identifier";
 const unknownTypeCode = "unknown-type";
+const reservedKeywordIdentifierCode = "reserved-keyword-identifier";
 const arityMismatchCode = "arity-mismatch";
 const callArgumentTypeMismatchCode = "call-argument-type-mismatch";
 const assignmentTypeMismatchCode = "assignment-type-mismatch";
@@ -52,23 +71,31 @@ const operatorTypeMismatchCode = "operator-type-mismatch";
 const invalidMemberCallCode = "invalid-member-call";
 const caseMismatchMemberCode = "case-mismatch-member";
 const unknownMemberCode = "unknown-member";
+const implicitConversionNotExactCode = "implicit-conversion-not-exact";
+const stringByValueParameterCode = "string-parameter-pass-by-value";
 const syntaxUnclosedDelimiterCode = "syntax-unclosed-delimiter";
 const syntaxUnexpectedClosingDelimiterCode = "syntax-unexpected-closing-delimiter";
 const syntaxUnterminatedStringCode = "syntax-unterminated-string";
 const syntaxUnterminatedBlockCommentCode = "syntax-unterminated-block-comment";
 const syntaxUnparsableStatementCode = "syntax-unparsable-statement";
+const defaultArgumentOrderingCode = "default-argument-ordering";
+const bindingShadowingCode = "binding-shadowing";
+const inheritanceContractCode = "inheritance-contract-mismatch";
+const importDuplicateDeclarationCode = "import-duplicate-declaration";
+const importDependencyMismatchCode = "import-dependency-mismatch";
+const importForwardedDependencyWarningCode = "import-forwarded-dependency-warning";
 
-const matchingCloseByOpen: Record<string, string> = {
-  "(": ")",
-  "[": "]",
-  "{": "}"
-};
+const indexedContainerTypeNames = new Set<string>([
+  "array",
+  "mwsarray",
+  "mwstridedarray",
+  "mwfastarray",
+  "mwfastbuffer",
+  "mwnodpool",
+  "mwrefbuffer"
+]);
 
-const matchingOpenByClose: Record<string, string> = {
-  ")": "(",
-  "]": "[",
-  "}": "{"
-};
+const intrinsicGenericTypeBases = new Set<string>(["array", "dictionary"]);
 
 export function getSyntaxDiagnostics(
   document: TextDocument,
@@ -81,11 +108,19 @@ export function getSyntaxDiagnostics(
     maxDiagnostics: parserSettings?.maxDiagnostics ?? 200
   };
 
-  return [
-    ...collectUnterminatedLiteralDiagnostics(document),
-    ...collectDelimiterDiagnostics(document, analysis.maskedText),
-    ...collectGrammarDiagnostics(document, analysis, effectiveParserSettings)
-  ];
+  return collectParserSyntaxDiagnostics(
+    document,
+    analysis,
+    effectiveParserSettings,
+    LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+    {
+      syntaxUnclosedDelimiterCode,
+      syntaxUnexpectedClosingDelimiterCode,
+      syntaxUnterminatedStringCode,
+      syntaxUnterminatedBlockCommentCode,
+      syntaxUnparsableStatementCode
+    }
+  );
 }
 
 interface DiagnosticData {
@@ -95,6 +130,25 @@ interface DiagnosticData {
     newText: string;
     title?: string;
   }>;
+  compilerStage?: "binder" | "symbol-resolution" | "type-checker";
+  reservedKeywordContext?: string;
+}
+
+function withDiagnosticStage(
+  diagnostic: Diagnostic,
+  stage: NonNullable<DiagnosticData["compilerStage"]>
+): Diagnostic {
+  const existingData =
+    diagnostic.data && typeof diagnostic.data === "object"
+      ? (diagnostic.data as Record<string, unknown>)
+      : {};
+  return {
+    ...diagnostic,
+    data: {
+      ...existingData,
+      compilerStage: stage
+    } satisfies DiagnosticData
+  };
 }
 
 export function getSemanticDiagnostics(
@@ -116,20 +170,84 @@ export function getSemanticDiagnostics(
     return [];
   }
 
+  const workspaceTypeCatalog = collectWorkspaceTypeCatalog(allAnalyses);
+  const effectiveIndex = createWorkspaceTypeAwareIndex(
+    index,
+    workspaceTypeCatalog.byFullName
+  );
+
   const diagnostics: Diagnostic[] = [];
-  if (enableSemanticBinding && analysis.semanticBindingIssues.length > 0) {
-    for (const issue of analysis.semanticBindingIssues) {
+  const lineTextCache = new Map<number, string>();
+  const binderResult = enableSemanticBinding
+    ? runBinderPhase(document, analysis, effectiveIndex)
+    : undefined;
+  if (enableSemanticBinding && (binderResult?.diagnostics.length ?? 0) > 0) {
+    for (const diagnostic of binderResult?.diagnostics ?? []) {
+      if (
+        shouldSuppressPreprocessorDuplicateFunctionDiagnostic(
+          document,
+          diagnostic,
+          lineTextCache
+        )
+      ) {
+        continue;
+      }
       if (diagnostics.length >= settings.maxSymbolDiagnostics) {
         break;
       }
-      diagnostics.push({
-        severity: DiagnosticSeverity.Error,
-        range: issue.range,
-        message: issue.message,
-        source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
-        code: issue.code
-      });
+      diagnostics.push(withDiagnosticStage(diagnostic, "binder"));
     }
+  }
+
+  if (enableSemanticBinding && diagnostics.length < settings.maxSymbolDiagnostics) {
+    const remaining = settings.maxSymbolDiagnostics - diagnostics.length;
+    const reservedKeywordDiagnostics =
+      collectReservedKeywordIdentifierDiagnosticsFromModule(analysis, {
+        source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+        reservedKeywordIdentifierCode
+      });
+    diagnostics.push(
+      ...reservedKeywordDiagnostics
+        .slice(0, remaining)
+        .map((diagnostic) => withDiagnosticStage(diagnostic, "binder"))
+    );
+  }
+  if (enableSemanticBinding && diagnostics.length < settings.maxSymbolDiagnostics) {
+    const remaining = settings.maxSymbolDiagnostics - diagnostics.length;
+    const duplicateImportDiagnostics =
+      collectDuplicateImportDeclarationDiagnosticsFromModule(
+        analysis,
+        LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+        {
+          importDuplicateDeclarationCode,
+          importDependencyMismatchCode,
+          importForwardedDependencyWarningCode
+        }
+      );
+    diagnostics.push(
+      ...duplicateImportDiagnostics
+        .slice(0, remaining)
+        .map((diagnostic) => withDiagnosticStage(diagnostic, "binder"))
+    );
+  }
+  if (enableSemanticBinding && diagnostics.length < settings.maxSymbolDiagnostics) {
+    const remaining = settings.maxSymbolDiagnostics - diagnostics.length;
+    const dependencyImportDiagnostics =
+      collectImportDependencyDiagnosticsFromModule(
+        document,
+        analysis,
+        LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+        {
+          importDuplicateDeclarationCode,
+          importDependencyMismatchCode,
+          importForwardedDependencyWarningCode
+        }
+      );
+    diagnostics.push(
+      ...dependencyImportDiagnostics
+        .slice(0, remaining)
+        .map((diagnostic) => withDiagnosticStage(diagnostic, "binder"))
+    );
   }
 
   if (
@@ -139,15 +257,15 @@ export function getSemanticDiagnostics(
     return diagnostics;
   }
 
-  const knownCallables = collectKnownCallableNames(allAnalyses, index);
+  const knownCallables = collectKnownCallableNames(allAnalyses, effectiveIndex);
+  const knownTypeNames = collectKnownTypeNames(allAnalyses, effectiveIndex);
   const knownIdentifiers = collectKnownIdentifierNames(
     analysis,
     allAnalyses,
-    index,
+    effectiveIndex,
     knownCallables
   );
   const knownCallablesLower = buildCaseInsensitiveLookup(knownCallables);
-  const lineTextCache = new Map<number, string>();
 
   for (const occurrence of analysis.occurrences) {
     if (diagnostics.length >= settings.maxSymbolDiagnostics) {
@@ -157,20 +275,23 @@ export function getSemanticDiagnostics(
     if (isInsideAttributeBrackets(document, occurrence.range, lineTextCache)) {
       continue;
     }
+    if (isInsidePreprocessorDirectiveLine(document, occurrence.range, lineTextCache)) {
+      continue;
+    }
 
     if (occurrence.qualifier === "dot") {
       const dotDiagnostic = buildUnknownMemberDiagnostic(
         document,
         analysis,
         allAnalyses,
-        index,
+        effectiveIndex,
         occurrence,
         settings,
         workspaceFunctionReturnTypes,
         lineTextCache
       );
       if (dotDiagnostic) {
-        diagnostics.push(dotDiagnostic);
+        diagnostics.push(withDiagnosticStage(dotDiagnostic, "symbol-resolution"));
       }
       continue;
     }
@@ -179,7 +300,11 @@ export function getSemanticDiagnostics(
       continue;
     }
 
-    if (occurrence.isDeclaration || isLanguageKeyword(occurrence.name)) {
+    if (
+      occurrence.isDeclaration ||
+      isLanguageKeyword(occurrence.name) ||
+      isKeywordLikeToken(occurrence.name)
+    ) {
       continue;
     }
 
@@ -189,11 +314,11 @@ export function getSemanticDiagnostics(
           document,
           analysis,
           allAnalyses,
-          index,
+          effectiveIndex,
           occurrence
         );
         if (arityMismatch) {
-          diagnostics.push(arityMismatch);
+          diagnostics.push(withDiagnosticStage(arityMismatch, "symbol-resolution"));
         }
         continue;
       }
@@ -214,7 +339,7 @@ export function getSemanticDiagnostics(
         continue;
       }
 
-      if (isKnownTypeName(index, occurrence.name)) {
+      if (isKnownTypeName(effectiveIndex, occurrence.name, knownTypeNames)) {
         continue;
       }
 
@@ -223,11 +348,11 @@ export function getSemanticDiagnostics(
           document,
           analysis,
           allAnalyses,
-          index,
+          effectiveIndex,
           occurrence
         );
         if (arityMismatch) {
-          diagnostics.push(arityMismatch);
+          diagnostics.push(withDiagnosticStage(arityMismatch, "symbol-resolution"));
         }
         continue;
       }
@@ -235,7 +360,7 @@ export function getSemanticDiagnostics(
       const normalizedName = occurrence.name.toLowerCase();
       const caseCandidates = knownCallablesLower.get(normalizedName) ?? [];
       if (settings.enableCaseMismatch && caseCandidates.length > 0) {
-        diagnostics.push({
+        diagnostics.push(withDiagnosticStage({
           severity: DiagnosticSeverity.Error,
           range: occurrence.range,
           message: `Case mismatch: "${occurrence.name}" should be "${caseCandidates[0]}"`,
@@ -244,7 +369,7 @@ export function getSemanticDiagnostics(
           data: {
             replacements: caseCandidates
           } satisfies DiagnosticData
-        });
+        }, "symbol-resolution"));
         continue;
       }
 
@@ -253,7 +378,7 @@ export function getSemanticDiagnostics(
       }
 
       const suggestions = collectSuggestions(occurrence.name, knownCallables);
-      diagnostics.push({
+      diagnostics.push(withDiagnosticStage({
         severity: DiagnosticSeverity.Error,
         range: occurrence.range,
         message:
@@ -267,7 +392,7 @@ export function getSemanticDiagnostics(
         data: {
           replacements: suggestions
         } satisfies DiagnosticData
-      });
+      }, "symbol-resolution"));
       continue;
     }
 
@@ -276,6 +401,13 @@ export function getSemanticDiagnostics(
     }
 
     if (isNamespacePrefix(analysis.text, occurrence.end)) {
+      continue;
+    }
+
+    if (isInsideImportParameterDeclaration(analysis, occurrence)) {
+      continue;
+    }
+    if (isInsideImportDeclaration(analysis, occurrence)) {
       continue;
     }
 
@@ -291,7 +423,7 @@ export function getSemanticDiagnostics(
       }
     }
 
-    if (isKnownTypeName(index, occurrence.name)) {
+    if (isKnownTypeName(effectiveIndex, occurrence.name, knownTypeNames)) {
       continue;
     }
 
@@ -299,26 +431,55 @@ export function getSemanticDiagnostics(
       continue;
     }
 
+    if (
+      isKnownNamespaceInUsingDirective(
+        document,
+        occurrence,
+        effectiveIndex,
+        lineTextCache
+      )
+    ) {
+      continue;
+    }
+
+    if (
+      isKnownNamespaceQualifiedIdentifier(
+        document,
+        occurrence,
+        effectiveIndex,
+        lineTextCache,
+        knownTypeNames
+      )
+    ) {
+      continue;
+    }
+
     if (knownIdentifiers.has(occurrence.name)) {
       continue;
     }
 
-    diagnostics.push({
+    diagnostics.push(withDiagnosticStage({
       severity: DiagnosticSeverity.Error,
       range: occurrence.range,
       message: `Unknown identifier "${occurrence.name}"`,
       source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
       code: unknownIdentifierCode
-    });
+    }, "symbol-resolution"));
   }
 
   if (diagnostics.length < settings.maxSymbolDiagnostics) {
     const remaining = settings.maxSymbolDiagnostics - diagnostics.length;
-    const unknownTypeDiagnostics = collectUnknownTypeDiagnostics(
+    const unknownTypeDiagnostics = collectUnknownTypeDiagnosticsFromModule(
       analysis,
-      index
+      (typeText) => isKnownTypeString(effectiveIndex, typeText, knownTypeNames),
+      LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+      unknownTypeCode
     );
-    diagnostics.push(...unknownTypeDiagnostics.slice(0, remaining));
+    diagnostics.push(
+      ...unknownTypeDiagnostics
+        .slice(0, remaining)
+        .map((diagnostic) => withDiagnosticStage(diagnostic, "type-checker"))
+    );
   }
 
   if (enableTypeChecking && diagnostics.length < settings.maxSymbolDiagnostics) {
@@ -327,13 +488,22 @@ export function getSemanticDiagnostics(
       document,
       analysis,
       allAnalyses,
-      index,
-      workspaceFunctionReturnTypes
+      effectiveIndex,
+      workspaceFunctionReturnTypes,
+      workspaceTypeCatalog
     );
-    diagnostics.push(...typeCompatibilityDiagnostics.slice(0, remaining));
+    diagnostics.push(
+      ...typeCompatibilityDiagnostics
+        .slice(0, remaining)
+        .map((diagnostic) => withDiagnosticStage(diagnostic, "type-checker"))
+    );
   }
 
-  return dedupeDiagnostics(diagnostics);
+  return annotateDiagnosticsWithCompilerText(
+    dedupeDiagnostics(diagnostics),
+    document,
+    analysis
+  );
 }
 
 function buildUnknownMemberDiagnostic(
@@ -549,51 +719,82 @@ function collectKnownIdentifierNames(
       names.add(declaration.name);
     }
   }
+  for (const declaration of analysis.identifierDeclarations) {
+    names.add(declaration.name);
+  }
+  for (const typeDeclaration of analysis.typeDeclarations) {
+    names.add(typeDeclaration.name);
+    names.add(typeDeclaration.fullName);
+  }
 
   for (const otherAnalysis of allAnalyses) {
     for (const declarationName of otherAnalysis.declaredCallableNames) {
       names.add(declarationName);
+    }
+    for (const declaration of otherAnalysis.identifierDeclarations) {
+      names.add(declaration.name);
+    }
+    for (const typeDeclaration of otherAnalysis.typeDeclarations) {
+      names.add(typeDeclaration.name);
+      names.add(typeDeclaration.fullName);
     }
   }
 
   return names;
 }
 
-function collectUnknownTypeDiagnostics(
-  analysis: DocumentAnalysis,
+function collectKnownTypeNames(
+  allAnalyses: DocumentAnalysis[],
   index: CompletionIndex
-): Diagnostic[] {
-  const diagnostics: Diagnostic[] = [];
+): Set<string> {
+  const names = new Set<string>();
 
-  for (const fn of analysis.functions) {
-    if (
-      fn.returnType &&
-      fn.returnType !== "void" &&
-      !isKnownTypeString(index, fn.returnType)
-    ) {
-      diagnostics.push({
-        severity: DiagnosticSeverity.Error,
-        range: fn.nameRange,
-        message: `Unknown type "${fn.returnType}"`,
-        source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
-        code: unknownTypeCode
-      });
-    }
-
-    for (const declaration of [...fn.parameters, ...fn.localDeclarations]) {
-      if (!isKnownTypeString(index, declaration.type)) {
-        diagnostics.push({
-          severity: DiagnosticSeverity.Error,
-          range: declaration.range,
-          message: `Unknown type "${declaration.type}"`,
-          source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
-          code: unknownTypeCode
-        });
-      }
+  for (const fullName of index.typeInfoByFullName.keys()) {
+    names.add(fullName);
+    const shortName = fullName.split("::").pop();
+    if (shortName) {
+      names.add(shortName);
     }
   }
 
-  return dedupeDiagnostics(diagnostics);
+  for (const [shortName, fullNames] of index.typeFullNamesByShortName.entries()) {
+    names.add(shortName);
+    for (const fullName of fullNames) {
+      names.add(fullName);
+    }
+  }
+
+  for (const funcdefName of index.coreGlobalFuncdefNames) {
+    names.add(funcdefName);
+  }
+
+  for (const analysis of allAnalyses) {
+    for (const typeDeclaration of analysis.typeDeclarations) {
+      names.add(typeDeclaration.name);
+      names.add(typeDeclaration.fullName);
+    }
+    collectFuncdefNamesFromDeclarations(analysis.grammarProgram.declarations, names);
+  }
+
+  return names;
+}
+
+function collectFuncdefNamesFromDeclarations(
+  declarations: readonly GrammarDeclarationNodeLike[],
+  output: Set<string>
+): void {
+  for (const declaration of declarations) {
+    if (declaration.kind === "callable-declaration") {
+      if (declaration.declarationKind === "funcdef") {
+        output.add(declaration.name);
+      }
+      continue;
+    }
+
+    if (declaration.kind === "namespace" || declaration.kind === "type") {
+      collectFuncdefNamesFromDeclarations(declaration.body, output);
+    }
+  }
 }
 
 type TypeCompatibility = "compatible" | "incompatible" | "unknown";
@@ -624,6 +825,8 @@ interface CallArgumentSlice {
   openParen: number;
   closeParen: number;
   args: ExpressionSlice[];
+  hasOmittedArgument: boolean;
+  omittedArgumentOffset?: number;
 }
 
 interface AssignmentExpressionSlice {
@@ -635,6 +838,23 @@ interface ReturnStatementSlice {
   keywordStart: number;
   expression?: ExpressionSlice;
 }
+
+interface BinaryOperatorSlice {
+  left: string;
+  leftStart: number;
+  leftEnd: number;
+  operator: string;
+  operatorStart: number;
+  operatorEnd: number;
+  right: string;
+  rightStart: number;
+  rightEnd: number;
+}
+
+type GrammarDeclarationNodeLike = DocumentAnalysis["grammarProgram"]["declarations"][number];
+type GrammarFunctionNodeLike = Extract<GrammarDeclarationNodeLike, { kind: "function" }>;
+type GrammarStatementNodeLike = NonNullable<GrammarFunctionNodeLike["body"]>["statements"][number];
+type GrammarSimpleStatementNodeLike = Extract<GrammarStatementNodeLike, { kind: "statement" }>;
 
 interface TypeDescriptor {
   raw: string;
@@ -649,34 +869,166 @@ interface TypeDescriptor {
   isAny: boolean;
 }
 
+interface WorkspaceTypeCatalog {
+  byFullName: Map<string, TypeInfo>;
+  memberVariableTypesByFullName: Map<string, Map<string, string>>;
+}
+
+function findTopLevelEqualsIndex(text: string): number {
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let braceDepth = 0;
+  let angleDepth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escapeNext = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (inSingleQuote || inDoubleQuote) {
+      if (ch === "\\") {
+        escapeNext = true;
+      } else if (inSingleQuote && ch === "'") {
+        inSingleQuote = false;
+      } else if (inDoubleQuote && ch === "\"") {
+        inDoubleQuote = false;
+      }
+      continue;
+    }
+
+    if (ch === "'") {
+      inSingleQuote = true;
+      continue;
+    }
+    if (ch === "\"") {
+      inDoubleQuote = true;
+      continue;
+    }
+    if (ch === "(") {
+      parenDepth += 1;
+      continue;
+    }
+    if (ch === ")") {
+      parenDepth = Math.max(0, parenDepth - 1);
+      continue;
+    }
+    if (ch === "[") {
+      bracketDepth += 1;
+      continue;
+    }
+    if (ch === "]") {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+      continue;
+    }
+    if (ch === "{") {
+      braceDepth += 1;
+      continue;
+    }
+    if (ch === "}") {
+      braceDepth = Math.max(0, braceDepth - 1);
+      continue;
+    }
+    if (ch === "<") {
+      angleDepth += 1;
+      continue;
+    }
+    if (ch === ">") {
+      angleDepth = Math.max(0, angleDepth - 1);
+      continue;
+    }
+
+    if (
+      ch === "=" &&
+      parenDepth === 0 &&
+      bracketDepth === 0 &&
+      braceDepth === 0 &&
+      angleDepth === 0
+    ) {
+      const next = text[i + 1] ?? "";
+      if (next === "=") {
+        continue;
+      }
+      return i;
+    }
+  }
+
+  return -1;
+}
+
 function collectTypeCompatibilityDiagnostics(
   document: TextDocument,
   analysis: DocumentAnalysis,
   allAnalyses: DocumentAnalysis[],
   index: CompletionIndex,
-  workspaceFunctionReturnTypes?: Map<string, string>
+  workspaceFunctionReturnTypes?: Map<string, string>,
+  workspaceTypeCatalog?: WorkspaceTypeCatalog
 ): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   const effectiveReturnTypes =
     workspaceFunctionReturnTypes ?? collectFunctionReturnTypes(allAnalyses);
+  const effectiveWorkspaceTypeCatalog =
+    workspaceTypeCatalog ?? collectWorkspaceTypeCatalog(allAnalyses);
   const functionSources = buildExpressionFunctionSources(allAnalyses, index);
+  const lineTextCache = new Map<number, string>();
+  diagnostics.push(
+    ...collectDefaultArgumentOrderingDiagnosticsFromModule(
+      document,
+      analysis,
+      LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+      defaultArgumentOrderingCode
+    )
+  );
 
   for (const occurrence of analysis.occurrences) {
     if (!occurrence.isCall || occurrence.isDeclaration) {
       continue;
     }
-    if (occurrence.qualifier === "dot") {
+
+    const callArguments = getCallArgumentsAtOccurrence(analysis.text, occurrence);
+    if (!callArguments) {
       continue;
     }
+    if (callArguments.hasOmittedArgument) {
+      const offset = callArguments.omittedArgumentOffset ?? callArguments.openParen + 1;
+      diagnostics.push({
+        severity: DiagnosticSeverity.Error,
+        range: offsetToSingleCharRange(document, offset),
+        message: "Omitted call arguments are not supported.",
+        source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+        code: syntaxUnparsableStatementCode
+      });
+      continue;
+    }
+
+    if (occurrence.qualifier === "dot") {
+      const memberDiagnostic = buildMemberCallCompatibilityDiagnostic(
+        document,
+        analysis,
+        allAnalyses,
+        index,
+        occurrence,
+        callArguments,
+        effectiveReturnTypes,
+        functionSources,
+        lineTextCache,
+        effectiveWorkspaceTypeCatalog
+      );
+      if (memberDiagnostic) {
+        diagnostics.push(memberDiagnostic);
+      }
+      continue;
+    }
+
     if (isIntrinsicCallableIdentifier(occurrence.name)) {
       continue;
     }
     if (isKnownTypeName(index, occurrence.name)) {
-      continue;
-    }
-
-    const callArguments = getCallArgumentsAtOccurrence(analysis.text, occurrence);
-    if (!callArguments) {
       continue;
     }
 
@@ -708,7 +1060,8 @@ function collectTypeCompatibilityDiagnostics(
         argument.start,
         argument.text,
         effectiveReturnTypes,
-        functionSources
+        functionSources,
+        effectiveWorkspaceTypeCatalog
       )
     );
     const resolution = resolveBestCallableOverload(
@@ -735,6 +1088,72 @@ function collectTypeCompatibilityDiagnostics(
             : `No overload of "${occurrence.name}" accepts argument types (${actualTypeText}).`,
         source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
         code: callArgumentTypeMismatchCode
+      });
+      continue;
+    }
+
+    if (!resolution.matched || !resolution.best) {
+      continue;
+    }
+    if (
+      isAmbiguousCallableResolution(
+        index,
+        resolution.best,
+        arityCandidates,
+        actualTypes
+      )
+    ) {
+      const actualTypeText = actualTypes
+        .map((value) => value ?? "unknown")
+        .join(", ");
+      diagnostics.push({
+        severity: DiagnosticSeverity.Error,
+        range: occurrence.range,
+        message: `Call to "${occurrence.name}" is ambiguous for argument types (${actualTypeText}).`,
+        source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+        code: callArgumentTypeMismatchCode
+      });
+      continue;
+    }
+
+    const handleModeDiagnostic = buildHandleModeCallDiagnostic(
+      document,
+      occurrence,
+      callArguments,
+      resolution.best
+    );
+    if (handleModeDiagnostic) {
+      diagnostics.push(handleModeDiagnostic);
+      continue;
+    }
+
+    for (let i = 0; i < callArguments.args.length; i += 1) {
+      const parameter = getCallableParameterForArgumentIndex(resolution.best, i);
+      const argument = callArguments.args[i];
+      if (!parameter || !argument) {
+        continue;
+      }
+
+      if (
+        !isImplicitConversionNotExact(
+          parameter.typeText,
+          actualTypes[i],
+          argument.text
+        )
+      ) {
+        continue;
+      }
+
+      diagnostics.push({
+        severity: DiagnosticSeverity.Warning,
+        range: offsetToRange(
+          document,
+          argument.start,
+          Math.max(argument.start + 1, argument.end)
+        ),
+        message: "Implicit conversion of value is not exact",
+        source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+        code: implicitConversionNotExactCode
       });
     }
   }
@@ -772,35 +1191,103 @@ function collectTypeCompatibilityDiagnostics(
       assignment.expression.start,
       assignment.expression.text,
       effectiveReturnTypes,
-      functionSources
+      functionSources,
+      effectiveWorkspaceTypeCatalog
     );
+    const handleNullComparisonWarning = buildHandleNullComparisonWarningDiagnostic(
+      document,
+      analysis,
+      allAnalyses,
+      index,
+      assignment.expression,
+      effectiveReturnTypes,
+      functionSources,
+      effectiveWorkspaceTypeCatalog
+    );
+    if (handleNullComparisonWarning) {
+      diagnostics.push(handleNullComparisonWarning);
+    }
+    const assignmentBinary = splitByTopLevelBinaryOperator(assignment.expression.text);
+    if (assignmentBinary) {
+      const strictBinaryDiagnostic = buildStrictBinaryCompatibilityDiagnostic(
+        document,
+        analysis,
+        allAnalyses,
+        index,
+        assignment.expression.start,
+        assignmentBinary,
+        effectiveReturnTypes,
+        functionSources,
+        effectiveWorkspaceTypeCatalog
+      );
+      if (strictBinaryDiagnostic) {
+        diagnostics.push(strictBinaryDiagnostic);
+        continue;
+      }
+    }
+    if (!actualType) {
+      const unresolvedDiagnostic = buildUnresolvedExpressionDiagnostic(
+        document,
+        analysis,
+        allAnalyses,
+        index,
+        assignment.expression,
+        effectiveReturnTypes,
+        functionSources,
+        effectiveWorkspaceTypeCatalog
+      );
+      if (unresolvedDiagnostic) {
+        diagnostics.push(unresolvedDiagnostic);
+      }
+      continue;
+    }
     const compatibility = evaluateAssignmentCompatibility(
       index,
       assignment.operator,
       declaration.type,
       actualType
     );
-    if (compatibility !== "incompatible") {
+    if (compatibility === "incompatible") {
+      diagnostics.push({
+        severity: DiagnosticSeverity.Error,
+        range: offsetToRange(
+          document,
+          assignment.expression.start,
+          Math.max(assignment.expression.start + 1, assignment.expression.end)
+        ),
+        message:
+          assignment.operator === "="
+            ? `Cannot assign value of type "${actualType ?? "unknown"}" to "${declaration.type}".`
+            : `Operator "${assignment.operator}" is not valid for "${declaration.type}" and "${actualType ?? "unknown"}".`,
+        source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+        code:
+          assignment.operator === "="
+            ? assignmentTypeMismatchCode
+            : operatorTypeMismatchCode
+      });
       continue;
     }
 
-    diagnostics.push({
-      severity: DiagnosticSeverity.Error,
-      range: offsetToRange(
-        document,
-        assignment.expression.start,
-        Math.max(assignment.expression.start + 1, assignment.expression.end)
-      ),
-      message:
-        assignment.operator === "="
-          ? `Cannot assign value of type "${actualType ?? "unknown"}" to "${declaration.type}".`
-          : `Operator "${assignment.operator}" is not valid for "${declaration.type}" and "${actualType ?? "unknown"}".`,
-      source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
-      code:
-        assignment.operator === "="
-          ? assignmentTypeMismatchCode
-          : operatorTypeMismatchCode
-    });
+    if (
+      assignment.operator === "=" &&
+      isImplicitConversionNotExact(
+        declaration.type,
+        actualType,
+        assignment.expression.text
+      )
+    ) {
+      diagnostics.push({
+        severity: DiagnosticSeverity.Warning,
+        range: offsetToRange(
+          document,
+          assignment.expression.start,
+          Math.max(assignment.expression.start + 1, assignment.expression.end)
+        ),
+        message: "Implicit conversion of value is not exact",
+        source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+        code: implicitConversionNotExactCode
+      });
+    }
   }
 
   for (const fn of analysis.functions) {
@@ -814,6 +1301,60 @@ function collectTypeCompatibilityDiagnostics(
         continue;
       }
 
+      if (containsUnqualifiedIdentifierToken(initializer.text, declaration.name)) {
+        diagnostics.push({
+          severity: DiagnosticSeverity.Warning,
+          range: declaration.range,
+          message: `'${declaration.name}' is not initialized.`,
+          source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+          code: implicitConversionNotExactCode
+        });
+        diagnostics.push({
+          severity: DiagnosticSeverity.Error,
+          range: offsetToRange(
+            document,
+            initializer.start,
+            Math.max(initializer.start + 1, initializer.end)
+          ),
+          message: `Cannot use "${declaration.name}" in its own initializer.`,
+          source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+          code: assignmentTypeMismatchCode
+        });
+        continue;
+      }
+
+      const handleNullComparisonWarning = buildHandleNullComparisonWarningDiagnostic(
+        document,
+        analysis,
+        allAnalyses,
+        index,
+        initializer,
+        effectiveReturnTypes,
+        functionSources,
+        effectiveWorkspaceTypeCatalog
+      );
+      if (handleNullComparisonWarning) {
+        diagnostics.push(handleNullComparisonWarning);
+      }
+      const initializerBinary = splitByTopLevelBinaryOperator(initializer.text);
+      if (initializerBinary) {
+        const strictBinaryDiagnostic = buildStrictBinaryCompatibilityDiagnostic(
+          document,
+          analysis,
+          allAnalyses,
+          index,
+          initializer.start,
+          initializerBinary,
+          effectiveReturnTypes,
+          functionSources,
+          effectiveWorkspaceTypeCatalog
+        );
+        if (strictBinaryDiagnostic) {
+          diagnostics.push(strictBinaryDiagnostic);
+          continue;
+        }
+      }
+
       const actualType = inferExpressionTypeAtOffset(
         document,
         analysis,
@@ -822,25 +1363,103 @@ function collectTypeCompatibilityDiagnostics(
         initializer.start,
         initializer.text,
         effectiveReturnTypes,
-        functionSources
+        functionSources,
+        effectiveWorkspaceTypeCatalog
       );
+      if (!actualType) {
+        const unresolvedDiagnostic = buildUnresolvedExpressionDiagnostic(
+          document,
+          analysis,
+          allAnalyses,
+          index,
+          initializer,
+          effectiveReturnTypes,
+          functionSources,
+          effectiveWorkspaceTypeCatalog
+        );
+        if (unresolvedDiagnostic) {
+          diagnostics.push(unresolvedDiagnostic);
+        }
+        continue;
+      }
+      const compatibility = evaluateAssignmentCompatibility(
+        index,
+        "=",
+        declaration.type,
+        actualType
+      );
+      if (compatibility === "incompatible") {
+        diagnostics.push({
+          severity: DiagnosticSeverity.Error,
+          range: offsetToRange(
+            document,
+            initializer.start,
+            Math.max(initializer.start + 1, initializer.end)
+          ),
+          message: `Cannot assign value of type "${actualType ?? "unknown"}" to "${declaration.type}".`,
+          source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+          code: assignmentTypeMismatchCode
+        });
+        continue;
+      }
+
       if (
-        evaluateAssignmentCompatibility(index, "=", declaration.type, actualType) !==
-        "incompatible"
+        isImplicitConversionNotExact(
+          declaration.type,
+          actualType,
+          initializer.text
+        )
+      ) {
+        diagnostics.push({
+          severity: DiagnosticSeverity.Warning,
+          range: offsetToRange(
+            document,
+            initializer.start,
+            Math.max(initializer.start + 1, initializer.end)
+          ),
+          message: "Implicit conversion of value is not exact",
+          source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+          code: implicitConversionNotExactCode
+        });
+      }
+    }
+  }
+
+  diagnostics.push(
+    ...collectVariableShadowingDiagnosticsFromModule(analysis, {
+      source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+      bindingShadowingCode
+    })
+  );
+  diagnostics.push(
+    ...collectInheritanceContractDiagnosticsFromModule(
+      document,
+      analysis,
+      allAnalyses,
+      index,
+      effectiveWorkspaceTypeCatalog,
+      {
+        source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+        inheritanceContractCode
+      }
+    )
+  );
+
+  for (const fn of analysis.functions) {
+    for (const parameter of fn.parameters) {
+      if (
+        !isStringParameterPassedByValue(parameter.type) ||
+        parameter.name.startsWith("_")
       ) {
         continue;
       }
 
       diagnostics.push({
-        severity: DiagnosticSeverity.Error,
-        range: offsetToRange(
-          document,
-          initializer.start,
-          Math.max(initializer.start + 1, initializer.end)
-        ),
-        message: `Cannot assign value of type "${actualType ?? "unknown"}" to "${declaration.type}".`,
+        severity: DiagnosticSeverity.Warning,
+        range: parameter.range,
+        message: `Sanity check: Use 'const string &in ${parameter.name}' to pass a string by reference (prefix the parameter name with an underscore to ignore this warning)`,
         source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
-        code: assignmentTypeMismatchCode
+        code: stringByValueParameterCode
       });
     }
   }
@@ -892,16 +1511,255 @@ function collectTypeCompatibilityDiagnostics(
         statement.expression.start,
         statement.expression.text,
         effectiveReturnTypes,
-        functionSources
+        functionSources,
+        effectiveWorkspaceTypeCatalog
       );
+      if (!actualReturnType) {
+        continue;
+      }
+      const returnCompatibility = evaluateAssignmentCompatibility(
+        index,
+        "=",
+        expectedReturnType,
+        actualReturnType
+      );
+      if (returnCompatibility === "incompatible") {
+        diagnostics.push({
+          severity: DiagnosticSeverity.Error,
+          range: offsetToRange(
+            document,
+            statement.expression.start,
+            Math.max(statement.expression.start + 1, statement.expression.end)
+          ),
+          message: `Cannot return "${actualReturnType ?? "unknown"}" from function returning "${expectedReturnType}".`,
+          source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+          code: returnTypeMismatchCode
+        });
+        continue;
+      }
+
       if (
-        evaluateAssignmentCompatibility(
-          index,
-          "=",
+        isImplicitConversionNotExact(
           expectedReturnType,
-          actualReturnType
-        ) !== "incompatible"
+          actualReturnType,
+          statement.expression.text
+        )
       ) {
+        diagnostics.push({
+          severity: DiagnosticSeverity.Warning,
+          range: offsetToRange(
+            document,
+            statement.expression.start,
+            Math.max(statement.expression.start + 1, statement.expression.end)
+          ),
+          message: "Implicit conversion of value is not exact",
+          source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+          code: implicitConversionNotExactCode
+        });
+      }
+    }
+  }
+
+  diagnostics.push(
+    ...collectStandaloneExpressionOperatorDiagnostics(
+      document,
+      analysis,
+      allAnalyses,
+      index,
+      effectiveReturnTypes,
+      functionSources,
+      effectiveWorkspaceTypeCatalog
+    )
+  );
+
+  const deduped = dedupeDiagnostics(diagnostics);
+  const hasErrorDiagnostics = deduped.some(
+    (diagnostic) =>
+      diagnostic.severity === undefined ||
+      diagnostic.severity === DiagnosticSeverity.Error
+  );
+  if (!hasErrorDiagnostics) {
+    return deduped;
+  }
+
+  return deduped.filter((diagnostic) => {
+    if (diagnostic.severity !== DiagnosticSeverity.Warning) {
+      return true;
+    }
+    return (
+      typeof diagnostic.code !== "string" ||
+      diagnostic.code !== stringByValueParameterCode
+    );
+  });
+}
+
+function collectStandaloneExpressionOperatorDiagnostics(
+  document: TextDocument,
+  analysis: DocumentAnalysis,
+  allAnalyses: DocumentAnalysis[],
+  index: CompletionIndex,
+  workspaceFunctionReturnTypes: Map<string, string>,
+  functionSources: ExpressionFunctionSources,
+  workspaceTypeCatalog?: WorkspaceTypeCatalog
+): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const grammarFunctions: GrammarFunctionNodeLike[] = [];
+  collectGrammarFunctionNodes(analysis.grammarProgram.declarations, grammarFunctions);
+
+  for (const grammarFunction of grammarFunctions) {
+    if (!grammarFunction.body) {
+      continue;
+    }
+
+    const simpleStatements: GrammarSimpleStatementNodeLike[] = [];
+    for (const statement of grammarFunction.body.statements) {
+      collectSimpleStatements(statement, simpleStatements);
+    }
+
+    for (const statement of simpleStatements) {
+      const statementRaw = analysis.text.slice(statement.start, statement.end);
+      if (!statementRaw) {
+        continue;
+      }
+
+      const leading = countLeadingWhitespace(statementRaw);
+      const trailing = countTrailingWhitespace(statementRaw);
+      const statementStart = statement.start + leading;
+      const statementEnd = statement.end - trailing;
+      if (statementEnd <= statementStart) {
+        continue;
+      }
+
+      let expressionText = analysis.text.slice(statementStart, statementEnd);
+      if (!expressionText.endsWith(";")) {
+        continue;
+      }
+      expressionText = expressionText.slice(0, -1).trimEnd();
+      if (!expressionText) {
+        continue;
+      }
+
+      if (/^(?:return|break|continue|throw)\b/.test(expressionText)) {
+        continue;
+      }
+      const assignmentDiagnostic = buildStandaloneAssignmentExpressionDiagnostic(
+        document,
+        analysis,
+        allAnalyses,
+        index,
+        statementStart,
+        expressionText,
+        workspaceFunctionReturnTypes,
+        functionSources,
+        workspaceTypeCatalog
+      );
+      if (assignmentDiagnostic) {
+        diagnostics.push(assignmentDiagnostic);
+        continue;
+      }
+      if (splitTopLevelAssignmentExpression(expressionText)) {
+        continue;
+      }
+
+      const binary = splitByTopLevelBinaryOperator(expressionText);
+      if (
+        binary &&
+        (binary.operator === "==" || binary.operator === "!=")
+      ) {
+        const leftIsNull = binary.left.trim() === "null";
+        const rightIsNull = binary.right.trim() === "null";
+        if (leftIsNull !== rightIsNull) {
+          const nonNullStart = leftIsNull ? binary.rightStart : binary.leftStart;
+          const nonNullText = leftIsNull ? binary.right : binary.left;
+          const nonNullType = inferExpressionTypeAtOffset(
+            document,
+            analysis,
+            allAnalyses,
+            index,
+            statementStart + nonNullStart,
+            nonNullText,
+            workspaceFunctionReturnTypes,
+            functionSources,
+            workspaceTypeCatalog
+          );
+          if (nonNullType && nonNullType.includes("@")) {
+            diagnostics.push({
+              severity: DiagnosticSeverity.Warning,
+              range: offsetToRange(
+                document,
+                statementStart + binary.operatorStart,
+                Math.max(statementStart + binary.operatorStart + 1, statementStart + binary.operatorEnd)
+              ),
+              message: "The operand is implicitly converted to handle in order to compare them",
+              source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+              code: implicitConversionNotExactCode
+            });
+          }
+        }
+      }
+      if (binary) {
+        const strictBinaryDiagnostic = buildStrictBinaryCompatibilityDiagnostic(
+          document,
+          analysis,
+          allAnalyses,
+          index,
+          statementStart,
+          binary,
+          workspaceFunctionReturnTypes,
+          functionSources,
+          workspaceTypeCatalog
+        );
+        if (strictBinaryDiagnostic) {
+          diagnostics.push(strictBinaryDiagnostic);
+          continue;
+        }
+      }
+
+      const expressionType = inferExpressionTypeAtOffset(
+        document,
+        analysis,
+        allAnalyses,
+        index,
+        statementStart,
+        expressionText,
+        workspaceFunctionReturnTypes,
+        functionSources,
+        workspaceTypeCatalog
+      );
+      if (expressionType) {
+        continue;
+      }
+
+      if (!binary) {
+        continue;
+      }
+
+      const leftType = inferExpressionTypeAtOffset(
+        document,
+        analysis,
+        allAnalyses,
+        index,
+        statementStart + binary.leftStart,
+        binary.left,
+        workspaceFunctionReturnTypes,
+        functionSources,
+        workspaceTypeCatalog
+      );
+      const rightType = inferExpressionTypeAtOffset(
+        document,
+        analysis,
+        allAnalyses,
+        index,
+        statementStart + binary.rightStart,
+        binary.right,
+        workspaceFunctionReturnTypes,
+        functionSources,
+        workspaceTypeCatalog
+      );
+      if (!leftType || !rightType) {
+        continue;
+      }
+      if (inferBinaryOperatorResultType(binary.operator, leftType, rightType)) {
         continue;
       }
 
@@ -909,17 +1767,838 @@ function collectTypeCompatibilityDiagnostics(
         severity: DiagnosticSeverity.Error,
         range: offsetToRange(
           document,
-          statement.expression.start,
-          Math.max(statement.expression.start + 1, statement.expression.end)
+          statementStart + binary.operatorStart,
+          Math.max(statementStart + binary.operatorStart + 1, statementStart + binary.operatorEnd)
         ),
-        message: `Cannot return "${actualReturnType ?? "unknown"}" from function returning "${expectedReturnType}".`,
+        message: `Operator "${binary.operator}" is not valid for "${leftType}" and "${rightType}".`,
         source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
-        code: returnTypeMismatchCode
+        code: operatorTypeMismatchCode
       });
     }
   }
 
   return diagnostics;
+}
+
+function buildStrictBinaryCompatibilityDiagnostic(
+  document: TextDocument,
+  analysis: DocumentAnalysis,
+  allAnalyses: DocumentAnalysis[],
+  index: CompletionIndex,
+  statementStart: number,
+  binary: BinaryOperatorSlice,
+  workspaceFunctionReturnTypes: Map<string, string>,
+  functionSources: ExpressionFunctionSources,
+  workspaceTypeCatalog?: WorkspaceTypeCatalog
+): Diagnostic | undefined {
+  const leftType = inferExpressionTypeAtOffset(
+    document,
+    analysis,
+    allAnalyses,
+    index,
+    statementStart + binary.leftStart,
+    binary.left,
+    workspaceFunctionReturnTypes,
+    functionSources,
+    workspaceTypeCatalog
+  );
+  const rightType = inferExpressionTypeAtOffset(
+    document,
+    analysis,
+    allAnalyses,
+    index,
+    statementStart + binary.rightStart,
+    binary.right,
+    workspaceFunctionReturnTypes,
+    functionSources,
+    workspaceTypeCatalog
+  );
+  if (!leftType || !rightType) {
+    return undefined;
+  }
+
+  const op = binary.operator;
+  const isLogicalOp = op === "&&" || op === "||" || op === "and" || op === "or";
+  if (isLogicalOp) {
+    if (!isBoolTypeName(leftType) || !isBoolTypeName(rightType)) {
+      return {
+        severity: DiagnosticSeverity.Error,
+        range: offsetToRange(
+          document,
+          statementStart + binary.operatorStart,
+          Math.max(statementStart + binary.operatorStart + 1, statementStart + binary.operatorEnd)
+        ),
+        message: `Operator "${op}" is not valid for "${leftType}" and "${rightType}".`,
+        source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+        code: operatorTypeMismatchCode
+      };
+    }
+    return undefined;
+  }
+
+  const isComparisonOp =
+    op === "==" || op === "!=" || op === "<" || op === ">" || op === "<=" || op === ">=";
+  if (!isComparisonOp) {
+    return undefined;
+  }
+
+  const leftIsBool = isBoolTypeName(leftType);
+  const rightIsBool = isBoolTypeName(rightType);
+  const leftIsNumeric = isNumericTypeName(leftType);
+  const rightIsNumeric = isNumericTypeName(rightType);
+  const leftIsString = isStringTypeName(leftType);
+  const rightIsString = isStringTypeName(rightType);
+  if (
+    (leftIsBool && rightIsNumeric) ||
+    (rightIsBool && leftIsNumeric)
+  ) {
+    return {
+      severity: DiagnosticSeverity.Error,
+      range: offsetToRange(
+        document,
+        statementStart + binary.operatorStart,
+        Math.max(statementStart + binary.operatorStart + 1, statementStart + binary.operatorEnd)
+      ),
+      message: `Operator "${op}" is not valid for "${leftType}" and "${rightType}".`,
+      source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+      code: operatorTypeMismatchCode
+    };
+  }
+
+  const leftIsBuiltinComparable = leftIsBool || leftIsNumeric || leftIsString;
+  const rightIsBuiltinComparable = rightIsBool || rightIsNumeric || rightIsString;
+  if (leftIsBuiltinComparable && rightIsBuiltinComparable) {
+    const comparableCategoryMatch =
+      (leftIsNumeric && rightIsNumeric) ||
+      (leftIsBool && rightIsBool) ||
+      (leftIsString && rightIsString);
+    if (!comparableCategoryMatch) {
+      return {
+        severity: DiagnosticSeverity.Error,
+        range: offsetToRange(
+          document,
+          statementStart + binary.operatorStart,
+          Math.max(statementStart + binary.operatorStart + 1, statementStart + binary.operatorEnd)
+        ),
+        message: `Operator "${op}" is not valid for "${leftType}" and "${rightType}".`,
+        source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+        code: operatorTypeMismatchCode
+      };
+    }
+  }
+
+  return undefined;
+}
+
+interface IndexAccessExpressionSlice {
+  objectText: string;
+  objectStart: number;
+  objectEnd: number;
+  indexText: string;
+  indexStart: number;
+  indexEnd: number;
+  openBracket: number;
+  closeBracket: number;
+}
+
+function buildUnresolvedExpressionDiagnostic(
+  document: TextDocument,
+  analysis: DocumentAnalysis,
+  allAnalyses: DocumentAnalysis[],
+  index: CompletionIndex,
+  expression: ExpressionSlice,
+  workspaceFunctionReturnTypes: Map<string, string>,
+  functionSources: ExpressionFunctionSources,
+  workspaceTypeCatalog?: WorkspaceTypeCatalog
+): Diagnostic | undefined {
+  const binary = splitByTopLevelBinaryOperator(expression.text);
+  if (binary) {
+    const strictBinaryDiagnostic = buildStrictBinaryCompatibilityDiagnostic(
+      document,
+      analysis,
+      allAnalyses,
+      index,
+      expression.start,
+      binary,
+      workspaceFunctionReturnTypes,
+      functionSources,
+      workspaceTypeCatalog
+    );
+    if (strictBinaryDiagnostic) {
+      return strictBinaryDiagnostic;
+    }
+
+    const leftType = inferExpressionTypeAtOffset(
+      document,
+      analysis,
+      allAnalyses,
+      index,
+      expression.start + binary.leftStart,
+      binary.left,
+      workspaceFunctionReturnTypes,
+      functionSources,
+      workspaceTypeCatalog
+    );
+    const rightType = inferExpressionTypeAtOffset(
+      document,
+      analysis,
+      allAnalyses,
+      index,
+      expression.start + binary.rightStart,
+      binary.right,
+      workspaceFunctionReturnTypes,
+      functionSources,
+      workspaceTypeCatalog
+    );
+    if (
+      leftType &&
+      rightType &&
+      !inferBinaryOperatorResultType(binary.operator, leftType, rightType)
+    ) {
+      return {
+        severity: DiagnosticSeverity.Error,
+        range: offsetToRange(
+          document,
+          expression.start + binary.operatorStart,
+          Math.max(expression.start + binary.operatorStart + 1, expression.start + binary.operatorEnd)
+        ),
+        message: `Operator "${binary.operator}" is not valid for "${leftType}" and "${rightType}".`,
+        source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+        code: operatorTypeMismatchCode
+      };
+    }
+  }
+
+  const indexAccess = splitTopLevelIndexAccessExpression(expression.text, expression.start);
+  if (!indexAccess) {
+    return undefined;
+  }
+
+  if (looksLikeInvalidNumericLiteralSuffix(indexAccess.indexText)) {
+    return {
+      severity: DiagnosticSeverity.Error,
+      range: offsetToRange(
+        document,
+        indexAccess.indexStart,
+        Math.max(indexAccess.indexStart + 1, indexAccess.indexEnd)
+      ),
+      message: "Invalid numeric literal suffix.",
+      source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+      code: syntaxUnparsableStatementCode
+    };
+  }
+
+  const objectType = inferExpressionTypeAtOffset(
+    document,
+    analysis,
+    allAnalyses,
+    index,
+    indexAccess.objectStart,
+    indexAccess.objectText,
+    workspaceFunctionReturnTypes,
+    functionSources,
+    workspaceTypeCatalog
+  );
+  const indexType = inferExpressionTypeAtOffset(
+    document,
+    analysis,
+    allAnalyses,
+    index,
+    indexAccess.indexStart,
+    indexAccess.indexText,
+    workspaceFunctionReturnTypes,
+    functionSources,
+    workspaceTypeCatalog
+  );
+  if (!objectType || !indexType) {
+    return undefined;
+  }
+
+  return {
+    severity: DiagnosticSeverity.Error,
+    range: offsetToRange(
+      document,
+      indexAccess.openBracket,
+      Math.max(indexAccess.openBracket + 1, indexAccess.closeBracket + 1)
+    ),
+    message: `Type "${objectType}" doesn't support the indexing operator for "${indexType}".`,
+    source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+    code: operatorTypeMismatchCode
+  };
+}
+
+function splitTopLevelIndexAccessExpression(
+  text: string,
+  startOffset: number
+): IndexAccessExpressionSlice | undefined {
+  if (!text) {
+    return undefined;
+  }
+
+  const leading = countLeadingWhitespace(text);
+  const trailing = countTrailingWhitespace(text);
+  const trimmedStart = startOffset + leading;
+  const trimmedEnd = startOffset + text.length - trailing;
+  if (trimmedEnd <= trimmedStart) {
+    return undefined;
+  }
+
+  const trimmed = text.slice(leading, text.length - trailing);
+  if (!trimmed.endsWith("]")) {
+    return undefined;
+  }
+
+  let parenDepth = 0;
+  let braceDepth = 0;
+  let angleDepth = 0;
+  let bracketDepth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escapeNext = false;
+  let currentTopLevelOpen = -1;
+  let lastTopLevelOpen = -1;
+  let lastTopLevelClose = -1;
+
+  for (let i = 0; i < trimmed.length; i += 1) {
+    const ch = trimmed[i];
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escapeNext = true;
+      continue;
+    }
+
+    if (inSingleQuote) {
+      if (ch === "'") {
+        inSingleQuote = false;
+      }
+      continue;
+    }
+    if (inDoubleQuote) {
+      if (ch === "\"") {
+        inDoubleQuote = false;
+      }
+      continue;
+    }
+
+    if (ch === "'") {
+      inSingleQuote = true;
+      continue;
+    }
+    if (ch === "\"") {
+      inDoubleQuote = true;
+      continue;
+    }
+
+    if (ch === "(") {
+      parenDepth += 1;
+      continue;
+    }
+    if (ch === ")") {
+      parenDepth = Math.max(0, parenDepth - 1);
+      continue;
+    }
+    if (ch === "{") {
+      braceDepth += 1;
+      continue;
+    }
+    if (ch === "}") {
+      braceDepth = Math.max(0, braceDepth - 1);
+      continue;
+    }
+    if (ch === "<") {
+      angleDepth += 1;
+      continue;
+    }
+    if (ch === ">") {
+      angleDepth = Math.max(0, angleDepth - 1);
+      continue;
+    }
+
+    if (parenDepth > 0 || braceDepth > 0 || angleDepth > 0) {
+      continue;
+    }
+
+    if (ch === "[") {
+      if (bracketDepth === 0) {
+        currentTopLevelOpen = i;
+      }
+      bracketDepth += 1;
+      continue;
+    }
+    if (ch === "]") {
+      if (bracketDepth === 0) {
+        return undefined;
+      }
+      bracketDepth -= 1;
+      if (bracketDepth === 0 && currentTopLevelOpen >= 0) {
+        lastTopLevelOpen = currentTopLevelOpen;
+        lastTopLevelClose = i;
+      }
+    }
+  }
+
+  if (
+    bracketDepth !== 0 ||
+    lastTopLevelOpen < 0 ||
+    lastTopLevelClose !== trimmed.length - 1
+  ) {
+    return undefined;
+  }
+
+  const objectRaw = trimmed.slice(0, lastTopLevelOpen);
+  const objectLeading = countLeadingWhitespace(objectRaw);
+  const objectTrailing = countTrailingWhitespace(objectRaw);
+  const objectStart = trimmedStart + objectLeading;
+  const objectEnd = trimmedStart + lastTopLevelOpen - objectTrailing;
+  if (objectEnd <= objectStart) {
+    return undefined;
+  }
+
+  const indexRaw = trimmed.slice(lastTopLevelOpen + 1, lastTopLevelClose);
+  const indexLeading = countLeadingWhitespace(indexRaw);
+  const indexTrailing = countTrailingWhitespace(indexRaw);
+  const indexStart = trimmedStart + lastTopLevelOpen + 1 + indexLeading;
+  const indexEnd = trimmedStart + lastTopLevelClose - indexTrailing;
+  if (indexEnd <= indexStart) {
+    return undefined;
+  }
+
+  return {
+    objectText: trimmed.slice(objectStart - trimmedStart, objectEnd - trimmedStart),
+    objectStart,
+    objectEnd,
+    indexText: trimmed.slice(indexStart - trimmedStart, indexEnd - trimmedStart),
+    indexStart,
+    indexEnd,
+    openBracket: trimmedStart + lastTopLevelOpen,
+    closeBracket: trimmedStart + lastTopLevelClose
+  };
+}
+
+function looksLikeInvalidNumericLiteralSuffix(text: string): boolean {
+  const candidate = text.trim();
+  if (!candidate) {
+    return false;
+  }
+
+  if (/^0x[0-9a-f]+$/i.test(candidate) || /^0b[01]+$/i.test(candidate)) {
+    return false;
+  }
+
+  return /^\d+[A-Za-z_][A-Za-z0-9_]*$/.test(candidate);
+}
+
+function buildStandaloneAssignmentExpressionDiagnostic(
+  document: TextDocument,
+  analysis: DocumentAnalysis,
+  allAnalyses: DocumentAnalysis[],
+  index: CompletionIndex,
+  statementStart: number,
+  expressionText: string,
+  workspaceFunctionReturnTypes: Map<string, string>,
+  functionSources: ExpressionFunctionSources,
+  workspaceTypeCatalog?: WorkspaceTypeCatalog
+): Diagnostic | undefined {
+  const assignment = splitTopLevelAssignmentExpression(expressionText);
+  if (!assignment) {
+    return undefined;
+  }
+
+  const lhsText = assignment.left.trim();
+  if (!lhsText || !lhsText.includes("[") || !lhsText.endsWith("]")) {
+    return undefined;
+  }
+
+  const lhsStart = statementStart + assignment.leftStart;
+  const lhsType = inferExpressionTypeAtOffset(
+    document,
+    analysis,
+    allAnalyses,
+    index,
+    lhsStart,
+    lhsText,
+    workspaceFunctionReturnTypes,
+    functionSources,
+    workspaceTypeCatalog
+  );
+  if (!lhsType) {
+    return undefined;
+  }
+
+  const lhsDescriptor = parseTypeDescriptor(lhsType);
+  if (lhsDescriptor?.isReference) {
+    return undefined;
+  }
+
+  const lhsIndexAccess = splitTopLevelIndexAccessExpression(lhsText, lhsStart);
+  if (lhsIndexAccess) {
+    const indexReceiverType = inferExpressionTypeAtOffset(
+      document,
+      analysis,
+      allAnalyses,
+      index,
+      lhsIndexAccess.objectStart,
+      lhsIndexAccess.objectText,
+      workspaceFunctionReturnTypes,
+      functionSources,
+      workspaceTypeCatalog
+    );
+    if (isMutableIndexedContainerType(indexReceiverType)) {
+      return undefined;
+    }
+  }
+
+  return {
+    severity: DiagnosticSeverity.Error,
+    range: offsetToRange(
+      document,
+      lhsStart,
+      Math.max(lhsStart + 1, lhsStart + lhsText.length)
+    ),
+    message: "Expression is not an l-value",
+    source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+    code: assignmentTypeMismatchCode
+  };
+}
+
+function isMutableIndexedContainerType(typeText: string | undefined): boolean {
+  if (!typeText) {
+    return false;
+  }
+  if (/\bconst\b/i.test(typeText)) {
+    return false;
+  }
+
+  const descriptor = parseTypeDescriptor(typeText);
+  if (!descriptor) {
+    return false;
+  }
+  return indexedContainerTypeNames.has(descriptor.shortBase);
+}
+
+function collectWorkspaceTypeCatalog(
+  allAnalyses: DocumentAnalysis[]
+): WorkspaceTypeCatalog {
+  const byFullName = new Map<string, TypeInfo>();
+
+  for (const analysis of allAnalyses) {
+    collectWorkspaceTypeInfosFromDeclarations(
+      analysis.grammarProgram.declarations,
+      "",
+      analysis.text,
+      byFullName
+    );
+  }
+
+  const memberVariableTypesByFullName = new Map<string, Map<string, string>>();
+  for (const [fullName, typeInfo] of byFullName) {
+    const memberTypes = new Map<string, string>();
+    for (const member of typeInfo.members) {
+      if (member.kind !== "property" || !member.type) {
+        continue;
+      }
+      memberTypes.set(member.name, member.type);
+    }
+    memberVariableTypesByFullName.set(fullName, memberTypes);
+  }
+
+  return {
+    byFullName,
+    memberVariableTypesByFullName
+  };
+}
+
+function collectWorkspaceTypeInfosFromDeclarations(
+  declarations: readonly GrammarDeclarationNodeLike[],
+  namespacePath: string,
+  sourceText: string,
+  output: Map<string, TypeInfo>
+): void {
+  for (const declaration of declarations) {
+    if (declaration.kind === "namespace") {
+      const childNamespace = namespacePath
+        ? `${namespacePath}::${declaration.name}`
+        : declaration.name;
+      collectWorkspaceTypeInfosFromDeclarations(
+        declaration.body,
+        childNamespace,
+        sourceText,
+        output
+      );
+      continue;
+    }
+
+    if (declaration.kind !== "type") {
+      continue;
+    }
+
+    const fullName = namespacePath
+      ? `${namespacePath}::${declaration.name}`
+      : declaration.name;
+    const parentShortName = extractParentTypeNameFromDeclarationHeader(
+      sourceText,
+      declaration
+    );
+    const members = collectWorkspaceTypeMembersFromTypeDeclaration(
+      declaration,
+      fullName
+    );
+    const existing = output.get(fullName);
+    if (existing) {
+      output.set(fullName, {
+        ...existing,
+        parentShortName: existing.parentShortName ?? parentShortName,
+        members: mergeTypeMembers(existing.members, members)
+      });
+    } else {
+      output.set(fullName, {
+        fullName,
+        shortName: declaration.name,
+        namespace: namespacePath,
+        parentShortName,
+        members
+      });
+    }
+
+    collectWorkspaceTypeInfosFromDeclarations(
+      declaration.body,
+      fullName,
+      sourceText,
+      output
+    );
+  }
+}
+
+function extractParentTypeNameFromDeclarationHeader(
+  sourceText: string,
+  declaration: Extract<GrammarDeclarationNodeLike, { kind: "type" }>
+): string | undefined {
+  if (declaration.typeKind === "enum") {
+    return undefined;
+  }
+
+  const declarationText = sourceText.slice(declaration.start, declaration.end);
+  const openBrace = declarationText.indexOf("{");
+  if (openBrace < 0) {
+    return undefined;
+  }
+
+  const header = declarationText.slice(0, openBrace);
+  const extendsMatch = /:\s*([^,{]+)/.exec(header);
+  if (!extendsMatch) {
+    return undefined;
+  }
+
+  const parent = normalizeTypeText(extendsMatch[1]).trim();
+  return parent.length > 0 ? parent : undefined;
+}
+
+function collectWorkspaceTypeMembersFromTypeDeclaration(
+  declaration: Extract<GrammarDeclarationNodeLike, { kind: "type" }>,
+  typeName: string
+): TypeInfo["members"] {
+  const members: TypeInfo["members"] = [];
+
+  for (const child of declaration.body) {
+    if (child.kind === "variable-declaration") {
+      const propertyType = normalizeTypeText(child.typeText).trim();
+      if (!propertyType) {
+        continue;
+      }
+      for (const declarator of child.declarators) {
+        if (!declarator.name) {
+          continue;
+        }
+        members.push({
+          kind: "property",
+          name: declarator.name,
+          type: propertyType
+        });
+      }
+      continue;
+    }
+
+    if (child.kind !== "function" && child.kind !== "callable-declaration") {
+      continue;
+    }
+
+    const returnType = normalizeTypeText(child.returnTypeText).trim();
+    const args = child.parameters
+      .map((parameter) =>
+        parameter.name
+          ? `${parameter.typeText} ${parameter.name}`
+          : parameter.typeText
+      )
+      .join(", ");
+    members.push({
+      kind: "method",
+      name: child.name,
+      returnType: returnType || typeName,
+      args
+    });
+  }
+
+  return mergeTypeMembers([], members);
+}
+
+function mergeTypeMembers(
+  base: TypeInfo["members"],
+  incoming: TypeInfo["members"]
+): TypeInfo["members"] {
+  const merged: TypeInfo["members"] = [...base];
+  const seen = new Set<string>(
+    base.map((member) =>
+      member.kind === "property"
+        ? `property|${member.name}|${member.type ?? ""}`
+        : `method|${member.name}|${member.returnType ?? ""}|${member.args ?? ""}`
+    )
+  );
+
+  for (const member of incoming) {
+    const key =
+      member.kind === "property"
+        ? `property|${member.name}|${member.type ?? ""}`
+        : `method|${member.name}|${member.returnType ?? ""}|${member.args ?? ""}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(member);
+  }
+
+  return merged;
+}
+
+function createWorkspaceTypeAwareIndex(
+  index: CompletionIndex,
+  workspaceTypesByFullName: Map<string, TypeInfo>
+): CompletionIndex {
+  if (workspaceTypesByFullName.size === 0) {
+    return index;
+  }
+
+  const typeInfoByFullName = new Map(index.typeInfoByFullName);
+  const typeFullNamesByShortName = new Map<string, string[]>();
+  for (const [shortName, fullNames] of index.typeFullNamesByShortName) {
+    typeFullNamesByShortName.set(shortName, [...fullNames]);
+  }
+
+  for (const [fullName, typeInfo] of workspaceTypesByFullName) {
+    const existing = typeInfoByFullName.get(fullName);
+    if (existing) {
+      typeInfoByFullName.set(fullName, {
+        ...existing,
+        members: mergeTypeMembers(existing.members, typeInfo.members)
+      });
+    } else {
+      typeInfoByFullName.set(fullName, {
+        ...typeInfo,
+        members: [...typeInfo.members]
+      });
+    }
+
+    const shortNames = [
+      typeInfo.shortName,
+      fullName.split("::").pop() ?? typeInfo.shortName
+    ];
+    for (const shortName of shortNames) {
+      const existingFullNames = typeFullNamesByShortName.get(shortName);
+      if (!existingFullNames) {
+        typeFullNamesByShortName.set(shortName, [fullName]);
+        continue;
+      }
+      if (!existingFullNames.includes(fullName)) {
+        existingFullNames.push(fullName);
+      }
+    }
+  }
+
+  return {
+    ...index,
+    typeInfoByFullName,
+    typeFullNamesByShortName,
+    resolvedMembersCache: new Map(),
+    resolvedMemberCompletionsCache: new Map()
+  };
+}
+
+function getMemberVariableTypesForOffset(
+  analysis: DocumentAnalysis,
+  offset: number,
+  workspaceTypeCatalog?: WorkspaceTypeCatalog
+): Map<string, string> | undefined {
+  if (!workspaceTypeCatalog) {
+    return undefined;
+  }
+
+  let bestType: DocumentAnalysis["typeDeclarations"][number] | undefined;
+  for (const typeDeclaration of analysis.typeDeclarations) {
+    if (offset < typeDeclaration.start || offset > typeDeclaration.end) {
+      continue;
+    }
+
+    if (
+      !bestType ||
+      typeDeclaration.end - typeDeclaration.start <
+        bestType.end - bestType.start
+    ) {
+      bestType = typeDeclaration;
+    }
+  }
+
+  if (!bestType) {
+    return undefined;
+  }
+
+  const candidates = [bestType.fullName, bestType.name].filter(
+    (value) => value.length > 0
+  );
+  for (const candidate of candidates) {
+    const memberTypes =
+      workspaceTypeCatalog.memberVariableTypesByFullName.get(candidate);
+    if (memberTypes) {
+      return memberTypes;
+    }
+  }
+
+  return undefined;
+}
+
+function collectGrammarFunctionNodes(
+  declarations: readonly GrammarDeclarationNodeLike[],
+  output: GrammarFunctionNodeLike[]
+): void {
+  for (const declaration of declarations) {
+    if (declaration.kind === "function") {
+      output.push(declaration);
+      continue;
+    }
+    if (declaration.kind === "namespace" || declaration.kind === "type") {
+      collectGrammarFunctionNodes(declaration.body, output);
+    }
+  }
+}
+
+function collectSimpleStatements(
+  statement: GrammarStatementNodeLike,
+  output: GrammarSimpleStatementNodeLike[]
+): void {
+  if (statement.kind === "statement") {
+    output.push(statement);
+    return;
+  }
+  if (statement.kind === "block") {
+    for (const nested of statement.statements) {
+      collectSimpleStatements(nested, output);
+    }
+    return;
+  }
+  if (statement.kind !== "variable-declaration" && statement.body) {
+    collectSimpleStatements(statement.body, output);
+  }
 }
 
 function evaluateSignatureCandidateCompatibility(
@@ -996,6 +2675,183 @@ function collectParsedCallableSignaturesForOccurrence(
   }
 
   return parsed;
+}
+
+function buildMemberCallCompatibilityDiagnostic(
+  document: TextDocument,
+  analysis: DocumentAnalysis,
+  allAnalyses: DocumentAnalysis[],
+  index: CompletionIndex,
+  occurrence: DocumentAnalysis["occurrences"][number],
+  callArguments: CallArgumentSlice,
+  workspaceFunctionReturnTypes: Map<string, string>,
+  functionSources: ExpressionFunctionSources,
+  lineTextCache: Map<number, string>,
+  workspaceTypeCatalog?: WorkspaceTypeCatalog
+): Diagnostic | undefined {
+  const receiverTypeFullName = resolveMemberReceiverTypeAtOccurrence(
+    document,
+    analysis,
+    allAnalyses,
+    index,
+    occurrence,
+    workspaceFunctionReturnTypes,
+    lineTextCache
+  );
+  if (!receiverTypeFullName) {
+    return undefined;
+  }
+
+  const methodSignatures = collectParsedMemberSignaturesForOccurrence(
+    index,
+    receiverTypeFullName,
+    occurrence.name
+  );
+  if (methodSignatures.length === 0) {
+    return undefined;
+  }
+
+  const arityCandidates = methodSignatures.filter(
+    (candidate) =>
+      callArguments.args.length >= candidate.minArgs &&
+      callArguments.args.length <= candidate.maxArgs
+  );
+  if (arityCandidates.length === 0) {
+    const formatted = methodSignatures
+      .map((candidate) =>
+        candidate.minArgs === candidate.maxArgs
+          ? `${candidate.minArgs}`
+          : `${candidate.minArgs}-${candidate.maxArgs}`
+      )
+      .slice(0, 3)
+      .join(", ");
+
+    return {
+      severity: DiagnosticSeverity.Error,
+      range: occurrence.range,
+      message: `No overload of "${occurrence.name}" on "${receiverTypeFullName}" accepts ${callArguments.args.length} argument(s). Expected ${formatted}.`,
+      source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+      code: arityMismatchCode
+    };
+  }
+
+  const actualTypes = callArguments.args.map((argument) =>
+    inferExpressionTypeAtOffset(
+      document,
+      analysis,
+      allAnalyses,
+      index,
+      argument.start,
+      argument.text,
+      workspaceFunctionReturnTypes,
+      functionSources,
+      workspaceTypeCatalog
+    )
+  );
+  const resolution = resolveBestCallableOverload(index, arityCandidates, actualTypes);
+  if (
+    resolution.matched &&
+    resolution.best &&
+    isAmbiguousCallableResolution(
+      index,
+      resolution.best,
+      arityCandidates,
+      actualTypes
+    )
+  ) {
+    const actualTypeText = actualTypes.map((value) => value ?? "unknown").join(", ");
+    return {
+      severity: DiagnosticSeverity.Error,
+      range: occurrence.range,
+      message: `Call to "${occurrence.name}" on "${receiverTypeFullName}" is ambiguous for argument types (${actualTypeText}).`,
+      source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+      code: callArgumentTypeMismatchCode
+    };
+  }
+
+  if (resolution.matched || !resolution.sawIncompatibleType) {
+    return undefined;
+  }
+
+  const actualTypeText = actualTypes.map((value) => value ?? "unknown").join(", ");
+  const expected = arityCandidates
+    .map((candidate) => candidate.label)
+    .slice(0, 3)
+    .join("; ");
+
+  return {
+    severity: DiagnosticSeverity.Error,
+    range: occurrence.range,
+    message:
+      expected.length > 0
+        ? `No overload of "${occurrence.name}" on "${receiverTypeFullName}" accepts argument types (${actualTypeText}). Expected ${expected}.`
+        : `No overload of "${occurrence.name}" on "${receiverTypeFullName}" accepts argument types (${actualTypeText}).`,
+    source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+    code: callArgumentTypeMismatchCode
+  };
+}
+
+function resolveMemberReceiverTypeAtOccurrence(
+  document: TextDocument,
+  analysis: DocumentAnalysis,
+  allAnalyses: DocumentAnalysis[],
+  index: CompletionIndex,
+  occurrence: DocumentAnalysis["occurrences"][number],
+  workspaceFunctionReturnTypes: Map<string, string>,
+  lineTextCache: Map<number, string>
+): string | undefined {
+  const lineText = getLineText(document, occurrence.range.start.line, lineTextCache);
+  const linePrefix = lineText.slice(0, occurrence.range.start.character);
+  const dotIndex = findLastDotOutsideParens(linePrefix);
+  if (dotIndex < 0) {
+    return undefined;
+  }
+
+  const receiverText = linePrefix.slice(0, dotIndex).trimEnd();
+  if (!receiverText) {
+    return undefined;
+  }
+
+  const typeContext = getTypeResolutionContextAtPosition(
+    document,
+    analysis,
+    occurrence.range.start.line,
+    occurrence.range.start.character,
+    allAnalyses,
+    workspaceFunctionReturnTypes
+  );
+  return tryResolveExpressionTypeFullName(index, receiverText, typeContext);
+}
+
+function collectParsedMemberSignaturesForOccurrence(
+  index: CompletionIndex,
+  receiverTypeFullName: string,
+  memberName: string
+): ParsedCallableSignature[] {
+  const signatures: ParsedCallableSignature[] = [];
+  const seen = new Set<string>();
+
+  for (const member of getResolvedMembersForType(index, receiverTypeFullName)) {
+    if (member.kind !== "method" || member.name !== memberName) {
+      continue;
+    }
+
+    const signature = parseCallableSignature(
+      `${normalizeTypeText(member.returnType || "void") || "void"} ${member.name}(${(member.args || "").trim()})`
+    );
+    if (!signature) {
+      continue;
+    }
+
+    const key = `${signature.returnType}:${signature.label}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    signatures.push(signature);
+  }
+
+  return signatures;
 }
 
 function parseCallableSignature(signatureLabel: string): ParsedCallableSignature | undefined {
@@ -1124,7 +2980,8 @@ function inferExpressionTypeAtOffset(
   offset: number,
   expressionText: string,
   workspaceFunctionReturnTypes: Map<string, string>,
-  functionSources?: ExpressionFunctionSources
+  functionSources?: ExpressionFunctionSources,
+  workspaceTypeCatalog?: WorkspaceTypeCatalog
 ): string | undefined {
   const safeOffset = Math.max(0, Math.min(offset, analysis.text.length));
   const position = document.positionAt(safeOffset);
@@ -1139,10 +2996,16 @@ function inferExpressionTypeAtOffset(
 
   const effectiveFunctionSources =
     functionSources ?? buildExpressionFunctionSources(allAnalyses, index);
+  const memberVariableTypes = getMemberVariableTypesForOffset(
+    analysis,
+    safeOffset,
+    workspaceTypeCatalog
+  );
   const expressionContext: ExpressionInferenceContext = {
     localVariableTypes: typeResolutionContext.localVariableTypes,
     localFunctionReturnTypes: typeResolutionContext.localFunctionReturnTypes,
-    functionSources: effectiveFunctionSources
+    functionSources: effectiveFunctionSources,
+    memberVariableTypes
   };
 
   const astBasedType = inferExpressionTypeFromText(
@@ -1155,6 +3018,288 @@ function inferExpressionTypeAtOffset(
   }
 
   return inferExpressionType(index, expressionText, typeResolutionContext, 0);
+}
+
+function getCallableParameterForArgumentIndex(
+  signature: ParsedCallableSignature,
+  argumentIndex: number
+): ParsedCallableParameter | undefined {
+  if (argumentIndex < signature.parameters.length) {
+    return signature.parameters[argumentIndex];
+  }
+  if (signature.parameters.length === 0) {
+    return undefined;
+  }
+
+  const last = signature.parameters[signature.parameters.length - 1];
+  return last.variadic ? last : undefined;
+}
+
+function isAmbiguousCallableResolution(
+  index: CompletionIndex,
+  best: ParsedCallableSignature,
+  candidates: ParsedCallableSignature[],
+  actualTypes: Array<string | undefined>
+): boolean {
+  for (const candidate of candidates) {
+    if (
+      candidate.label === best.label &&
+      candidate.returnType === best.returnType
+    ) {
+      continue;
+    }
+
+    const bestThenCandidate = resolveBestCallableOverload(
+      index,
+      [best, candidate],
+      actualTypes
+    );
+    const candidateThenBest = resolveBestCallableOverload(
+      index,
+      [candidate, best],
+      actualTypes
+    );
+    if (
+      !bestThenCandidate.matched ||
+      !candidateThenBest.matched ||
+      !bestThenCandidate.best ||
+      !candidateThenBest.best
+    ) {
+      continue;
+    }
+    if (bestThenCandidate.best.label !== candidateThenBest.best.label) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function buildHandleModeCallDiagnostic(
+  document: TextDocument,
+  occurrence: DocumentAnalysis["occurrences"][number],
+  callArguments: CallArgumentSlice,
+  signature: ParsedCallableSignature
+): Diagnostic | undefined {
+  for (let i = 0; i < callArguments.args.length; i += 1) {
+    const argument = callArguments.args[i];
+    const parameter = getCallableParameterForArgumentIndex(signature, i);
+    if (!argument || !parameter) {
+      continue;
+    }
+
+    const parameterText = parameter.rawText.toLowerCase();
+    const hasHandle = parameterText.includes("@");
+    const hasReference = parameterText.includes("&");
+
+    const hasInout = /\binout\b/.test(parameterText);
+    const hasOut = hasInout || /\bout\b/.test(parameterText);
+    const hasIn = hasInout || /\bin\b/.test(parameterText);
+
+    if (hasHandle && (hasIn || hasOut)) {
+      return {
+        severity: DiagnosticSeverity.Error,
+        range: offsetToRange(
+          document,
+          argument.start,
+          Math.max(argument.start + 1, argument.end)
+        ),
+        message: `Handle parameters cannot use in/out modifiers in calls to "${occurrence.name}".`,
+        source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+        code: callArgumentTypeMismatchCode
+      };
+    }
+
+    if (!hasReference) {
+      continue;
+    }
+
+    if (hasInout) {
+      return {
+        severity: DiagnosticSeverity.Error,
+        range: offsetToRange(
+          document,
+          argument.start,
+          Math.max(argument.start + 1, argument.end)
+        ),
+        message: `Reference inout parameters are not supported in calls to "${occurrence.name}".`,
+        source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+        code: callArgumentTypeMismatchCode
+      };
+    }
+
+    if (hasOut && !isLikelyAssignableReferenceArgument(argument.text)) {
+      return {
+        severity: DiagnosticSeverity.Error,
+        range: offsetToRange(
+          document,
+          argument.start,
+          Math.max(argument.start + 1, argument.end)
+        ),
+        message: `Out parameter of "${occurrence.name}" requires an assignable argument.`,
+        source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+        code: callArgumentTypeMismatchCode
+      };
+    }
+
+    if (hasIn && argument.text.trim() === "null") {
+      return {
+        severity: DiagnosticSeverity.Error,
+        range: offsetToRange(
+          document,
+          argument.start,
+          Math.max(argument.start + 1, argument.end)
+        ),
+        message: `Null cannot be passed to reference parameter of "${occurrence.name}".`,
+        source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+        code: callArgumentTypeMismatchCode
+      };
+    }
+  }
+
+  return undefined;
+}
+
+function isLikelyAssignableReferenceArgument(expressionText: string): boolean {
+  const trimmed = expressionText.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  return /^[A-Za-z_][A-Za-z0-9_]*(?:(?:\s*::\s*|\s*\.\s*)[A-Za-z_][A-Za-z0-9_]*|\s*\[[^\]]+\])*$/.test(
+    trimmed
+  );
+}
+
+function buildHandleNullComparisonWarningDiagnostic(
+  document: TextDocument,
+  analysis: DocumentAnalysis,
+  allAnalyses: DocumentAnalysis[],
+  index: CompletionIndex,
+  expression: ExpressionSlice,
+  workspaceFunctionReturnTypes: Map<string, string>,
+  functionSources: ExpressionFunctionSources,
+  workspaceTypeCatalog?: WorkspaceTypeCatalog
+): Diagnostic | undefined {
+  const binary = splitByTopLevelBinaryOperator(expression.text);
+  if (!binary || (binary.operator !== "==" && binary.operator !== "!=")) {
+    return undefined;
+  }
+
+  const leftIsNull = binary.left.trim() === "null";
+  const rightIsNull = binary.right.trim() === "null";
+  if (leftIsNull === rightIsNull) {
+    return undefined;
+  }
+
+  const nonNullStart = leftIsNull ? binary.rightStart : binary.leftStart;
+  const nonNullText = leftIsNull ? binary.right : binary.left;
+  const nonNullType = inferExpressionTypeAtOffset(
+    document,
+    analysis,
+    allAnalyses,
+    index,
+    expression.start + nonNullStart,
+    nonNullText,
+    workspaceFunctionReturnTypes,
+    functionSources,
+    workspaceTypeCatalog
+  );
+  if (!nonNullType || !nonNullType.includes("@")) {
+    return undefined;
+  }
+
+  return {
+    severity: DiagnosticSeverity.Warning,
+    range: offsetToRange(
+      document,
+      expression.start + binary.operatorStart,
+      Math.max(expression.start + binary.operatorStart + 1, expression.start + binary.operatorEnd)
+    ),
+    message: "The operand is implicitly converted to handle in order to compare them",
+    source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+    code: implicitConversionNotExactCode
+  };
+}
+
+function isImplicitConversionNotExact(
+  expectedTypeText: string | undefined,
+  actualTypeText: string | undefined,
+  expressionText: string
+): boolean {
+  const expectedBase = getTypeBaseName(expectedTypeText);
+  const actualBase = getTypeBaseName(actualTypeText);
+  if (!isIntegerTypeName(expectedBase) || !isFloatingTypeName(actualBase)) {
+    return false;
+  }
+
+  const literalValue = parseFloatingPointLiteralValue(expressionText);
+  if (literalValue === undefined) {
+    return false;
+  }
+
+  return !isExactIntegerNumber(literalValue);
+}
+
+function parseFloatingPointLiteralValue(expressionText: string): number | undefined {
+  const text = expressionText.trim().replace(/\s+/g, "");
+  if (!text) {
+    return undefined;
+  }
+
+  if (
+    !/^[+-]?(?:(?:\d+\.\d*|\d*\.\d+)(?:[eE][+-]?\d+)?|\d+(?:[eE][+-]?\d+))[fFdD]?$/.test(
+      text
+    )
+  ) {
+    return undefined;
+  }
+
+  const numericPart = text.replace(/[fFdD]$/, "");
+  const value = Number(numericPart);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function isExactIntegerNumber(value: number): boolean {
+  return Math.abs(value - Math.trunc(value)) < 1e-9;
+}
+
+function isStringParameterPassedByValue(typeText: string): boolean {
+  const normalized = normalizeParameterType(typeText);
+  if (!normalized || normalized.includes("&")) {
+    return false;
+  }
+  return getTypeBaseName(normalized) === "string";
+}
+
+function normalizeParameterType(typeText: string): string {
+  return normalizeTypeText(typeText)
+    .replace(/\b(const|in|out|inout)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getTypeBaseName(typeText: string | undefined): string {
+  if (!typeText) {
+    return "";
+  }
+
+  const normalized = normalizeTypeText(typeText)
+    .replace(/\b(const|in|out|inout)\b/g, " ")
+    .replace(/[@&]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) {
+    return "";
+  }
+
+  const withoutTemplate = normalized.split("<")[0].trim();
+  if (!withoutTemplate) {
+    return "";
+  }
+
+  const token = withoutTemplate.split(/\s+/)[0];
+  return (token.split("::").pop() ?? token).toLowerCase();
 }
 
 function inferExpressionType(
@@ -1242,10 +3387,10 @@ function inferExpressionType(
 
 function splitByTopLevelBinaryOperator(
   text: string
-): { left: string; operator: string; right: string } | undefined {
+): BinaryOperatorSlice | undefined {
   const precedenceGroups = [
     ["||", "&&", " and ", " or ", " xor "],
-    ["==", "!=", "<=", ">=", "<", ">", " is "],
+    ["==", "!=", "<=", ">=", "<", ">", " is ", " !is "],
     ["+", "-"],
     ["*", "/", "%"]
   ];
@@ -1256,12 +3401,41 @@ function splitByTopLevelBinaryOperator(
       continue;
     }
 
-    const left = text.slice(0, split.index).trim();
-    const right = text.slice(split.index + split.operator.length).trim();
-    if (!left || !right) {
+    const leftRaw = text.slice(0, split.index);
+    const rightRaw = text.slice(split.index + split.operator.length);
+    const leftLeading = countLeadingWhitespace(leftRaw);
+    const leftTrailing = countTrailingWhitespace(leftRaw);
+    const rightLeading = countLeadingWhitespace(rightRaw);
+    const rightTrailing = countTrailingWhitespace(rightRaw);
+    const operatorLeading = countLeadingWhitespace(split.operator);
+    const operatorTrailing = countTrailingWhitespace(split.operator);
+
+    const leftStart = leftLeading;
+    const leftEnd = leftRaw.length - leftTrailing;
+    const rightStart = split.index + split.operator.length + rightLeading;
+    const rightEnd = text.length - rightTrailing;
+    const operatorStart = split.index + operatorLeading;
+    const operatorEnd = split.index + split.operator.length - operatorTrailing;
+
+    if (
+      leftStart >= leftEnd ||
+      rightStart >= rightEnd ||
+      operatorStart >= operatorEnd
+    ) {
       continue;
     }
-    return { left, operator: split.operator.trim(), right };
+
+    return {
+      left: text.slice(leftStart, leftEnd),
+      leftStart,
+      leftEnd,
+      operator: split.operator.trim(),
+      operatorStart,
+      operatorEnd,
+      right: text.slice(rightStart, rightEnd),
+      rightStart,
+      rightEnd
+    };
   }
 
   return undefined;
@@ -1332,6 +3506,17 @@ function findTopLevelBinarySplit(
       braceDepth = Math.max(0, braceDepth - 1);
       continue;
     }
+    if (
+      (ch === "<" || ch === ">") &&
+      parenDepth === 0 &&
+      bracketDepth === 0 &&
+      braceDepth === 0 &&
+      angleDepth === 0 &&
+      hasWhitespaceAroundOperator(text, i) &&
+      operators.includes(ch)
+    ) {
+      return { index: i, operator: ch };
+    }
     if (ch === ">") {
       angleDepth += 1;
       continue;
@@ -1361,6 +3546,12 @@ function findTopLevelBinarySplit(
   }
 
   return undefined;
+}
+
+function hasWhitespaceAroundOperator(text: string, operatorIndex: number): boolean {
+  const before = text[operatorIndex - 1] ?? "";
+  const after = text[operatorIndex + 1] ?? "";
+  return /\s/.test(before) && /\s/.test(after);
 }
 
 function isUnaryOperatorAt(text: string, operatorStart: number): boolean {
@@ -1412,16 +3603,36 @@ function inferBinaryOperatorResultType(
     return undefined;
   }
 
-  if (
-    operator === "==" ||
-    operator === "!=" ||
-    operator === "<" ||
-    operator === ">" ||
-    operator === "<=" ||
-    operator === ">=" ||
-    operator === "is"
-  ) {
-    return "bool";
+  if (operator === "==" || operator === "!=") {
+    if (isNumericTypeName(leftType) && isNumericTypeName(rightType)) {
+      return "bool";
+    }
+    if (isBoolTypeName(leftType) && isBoolTypeName(rightType)) {
+      return "bool";
+    }
+    if (isStringTypeName(leftType) && isStringTypeName(rightType)) {
+      return "bool";
+    }
+    const normalizedLeft = normalizeTypeText(leftType || "");
+    const normalizedRight = normalizeTypeText(rightType || "");
+    if (normalizedLeft && normalizedRight && normalizedLeft === normalizedRight) {
+      return "bool";
+    }
+    return undefined;
+  }
+
+  if (operator === "<" || operator === ">" || operator === "<=" || operator === ">=") {
+    if (isNumericTypeName(leftType) && isNumericTypeName(rightType)) {
+      return "bool";
+    }
+    if (isStringTypeName(leftType) && isStringTypeName(rightType)) {
+      return "bool";
+    }
+    return undefined;
+  }
+
+  if (operator === "is" || operator === "!is") {
+    return leftType && rightType ? "bool" : undefined;
   }
 
   if (operator === "+" && (isStringTypeName(leftType) || isStringTypeName(rightType))) {
@@ -1465,7 +3676,7 @@ function evaluateTypeCompatibility(
   }
 
   if (!actual) {
-    return "unknown";
+    return isPrimitiveTypeName(expected.normalized) ? "incompatible" : "unknown";
   }
 
   if (actual.isAny || actual.isTemplateParameter) {
@@ -1657,6 +3868,8 @@ function getCallArgumentsAtOccurrence(
 
   const args: ExpressionSlice[] = [];
   let currentStart = openParen + 1;
+  let sawSeparator = false;
+  let omittedArgumentOffset: number | undefined;
   let parenDepth = 0;
   let bracketDepth = 0;
   let braceDepth = 0;
@@ -1703,21 +3916,19 @@ function getCallArgumentsAtOccurrence(
         continue;
       }
 
-      const segment = text.slice(currentStart, i).trim();
-      if (segment.length > 0) {
-        const segmentStart = currentStart + countLeadingWhitespace(text.slice(currentStart, i));
-        const segmentEnd = i - countTrailingWhitespace(text.slice(currentStart, i));
-        args.push({
-          text: segment,
-          start: segmentStart,
-          end: segmentEnd
-        });
+      const parsedSegment = parseCallArgumentSegment(text, currentStart, i);
+      if (parsedSegment) {
+        args.push(parsedSegment);
+      } else if (sawSeparator && omittedArgumentOffset === undefined) {
+        omittedArgumentOffset = currentStart;
       }
 
       return {
         openParen,
         closeParen: i,
-        args
+        args,
+        hasOmittedArgument: omittedArgumentOffset !== undefined,
+        omittedArgumentOffset
       };
     }
     if (ch === "[") {
@@ -1738,21 +3949,64 @@ function getCallArgumentsAtOccurrence(
     }
 
     if (ch === "," && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
-      const segment = text.slice(currentStart, i).trim();
-      if (segment.length > 0) {
-        const segmentStart = currentStart + countLeadingWhitespace(text.slice(currentStart, i));
-        const segmentEnd = i - countTrailingWhitespace(text.slice(currentStart, i));
-        args.push({
-          text: segment,
-          start: segmentStart,
-          end: segmentEnd
-        });
+      const parsedSegment = parseCallArgumentSegment(text, currentStart, i);
+      if (parsedSegment) {
+        args.push(parsedSegment);
+      } else if (omittedArgumentOffset === undefined) {
+        omittedArgumentOffset = currentStart;
       }
+      sawSeparator = true;
       currentStart = i + 1;
     }
   }
 
   return undefined;
+}
+
+function parseCallArgumentSegment(
+  source: string,
+  start: number,
+  end: number
+): ExpressionSlice | undefined {
+  if (end <= start) {
+    return undefined;
+  }
+
+  const raw = source.slice(start, end);
+  const leading = countLeadingWhitespace(raw);
+  const trailing = countTrailingWhitespace(raw);
+  const trimmedStart = start + leading;
+  const trimmedEnd = end - trailing;
+  if (trimmedEnd <= trimmedStart) {
+    return undefined;
+  }
+
+  const trimmed = source.slice(trimmedStart, trimmedEnd);
+  const namedMatch = /^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([\s\S]+)$/.exec(trimmed);
+  if (namedMatch) {
+    const valueText = namedMatch[2].trim();
+    if (valueText.length > 0) {
+      const valueStartInTrimmed = trimmed.indexOf(namedMatch[2]);
+      if (valueStartInTrimmed >= 0) {
+        const valueStart =
+          trimmedStart +
+          valueStartInTrimmed +
+          countLeadingWhitespace(namedMatch[2]);
+        const valueEnd = valueStart + valueText.length;
+        return {
+          text: valueText,
+          start: valueStart,
+          end: valueEnd
+        };
+      }
+    }
+  }
+
+  return {
+    text: trimmed,
+    start: trimmedStart,
+    end: trimmedEnd
+  };
 }
 
 function getDirectAssignmentAtOccurrence(
@@ -2002,6 +4256,157 @@ function findTopLevelChar(text: string, target: string): number {
 
   for (let i = 0; i < text.length; i += 1) {
     const ch = text[i];
+    if (
+      parenDepth === 0 &&
+      bracketDepth === 0 &&
+      braceDepth === 0 &&
+      angleDepth === 0 &&
+      ch === target
+    ) {
+      return i;
+    }
+
+    if (ch === "(") {
+      parenDepth += 1;
+      continue;
+    }
+    if (ch === ")") {
+      parenDepth = Math.max(0, parenDepth - 1);
+      continue;
+    }
+    if (ch === "[") {
+      bracketDepth += 1;
+      continue;
+    }
+    if (ch === "]") {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+      continue;
+    }
+    if (ch === "{") {
+      braceDepth += 1;
+      continue;
+    }
+    if (ch === "}") {
+      braceDepth = Math.max(0, braceDepth - 1);
+      continue;
+    }
+    if (ch === "<") {
+      angleDepth += 1;
+      continue;
+    }
+    if (ch === ">") {
+      angleDepth = Math.max(0, angleDepth - 1);
+      continue;
+    }
+  }
+
+  return -1;
+}
+
+function hasTopLevelEquals(text: string): boolean {
+  return findTopLevelChar(text, "=") >= 0;
+}
+
+function findTopLevelAssignmentOperator(
+  text: string
+): AssignmentExpressionSlice["operator"] | undefined {
+  return findTopLevelAssignmentSplit(text)?.operator;
+}
+
+function splitTopLevelAssignmentExpression(
+  text: string
+):
+  | {
+      operator: AssignmentExpressionSlice["operator"];
+      left: string;
+      leftStart: number;
+      leftEnd: number;
+      right: string;
+      rightStart: number;
+      rightEnd: number;
+    }
+  | undefined {
+  const split = findTopLevelAssignmentSplit(text);
+  if (!split) {
+    return undefined;
+  }
+
+  const leftRaw = text.slice(0, split.index);
+  const rightRaw = text.slice(split.index + split.operator.length);
+  const leftLeading = countLeadingWhitespace(leftRaw);
+  const leftTrailing = countTrailingWhitespace(leftRaw);
+  const rightLeading = countLeadingWhitespace(rightRaw);
+  const rightTrailing = countTrailingWhitespace(rightRaw);
+
+  const leftStart = leftLeading;
+  const leftEnd = leftRaw.length - leftTrailing;
+  const rightStart = split.index + split.operator.length + rightLeading;
+  const rightEnd = text.length - rightTrailing;
+  if (leftStart >= leftEnd || rightStart >= rightEnd) {
+    return undefined;
+  }
+
+  return {
+    operator: split.operator,
+    left: text.slice(leftStart, leftEnd),
+    leftStart,
+    leftEnd,
+    right: text.slice(rightStart, rightEnd),
+    rightStart,
+    rightEnd
+  };
+}
+
+function findTopLevelAssignmentSplit(
+  text: string
+): { index: number; operator: AssignmentExpressionSlice["operator"] } | undefined {
+  const operators: AssignmentExpressionSlice["operator"][] = [
+    "<<=",
+    ">>=",
+    "+=",
+    "-=",
+    "*=",
+    "/=",
+    "%=",
+    "&=",
+    "|=",
+    "^=",
+    "="
+  ];
+
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let braceDepth = 0;
+  let angleDepth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escapeNext = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    if (inSingleQuote || inDoubleQuote) {
+      if (ch === "\\") {
+        escapeNext = true;
+      } else if (inSingleQuote && ch === "'") {
+        inSingleQuote = false;
+      } else if (inDoubleQuote && ch === "\"") {
+        inDoubleQuote = false;
+      }
+      continue;
+    }
+
+    if (ch === "'") {
+      inSingleQuote = true;
+      continue;
+    }
+    if (ch === "\"") {
+      inDoubleQuote = true;
+      continue;
+    }
     if (ch === "(") {
       parenDepth += 1;
       continue;
@@ -2035,22 +4440,35 @@ function findTopLevelChar(text: string, target: string): number {
       continue;
     }
 
-    if (
-      parenDepth === 0 &&
-      bracketDepth === 0 &&
-      braceDepth === 0 &&
-      angleDepth === 0 &&
-      ch === target
-    ) {
-      return i;
+    if (parenDepth !== 0 || bracketDepth !== 0 || braceDepth !== 0 || angleDepth !== 0) {
+      continue;
+    }
+
+    for (const operator of operators) {
+      if (!text.startsWith(operator, i)) {
+        continue;
+      }
+
+      if (operator === "=") {
+        const previous = i > 0 ? text[i - 1] : "";
+        const next = i + 1 < text.length ? text[i + 1] : "";
+        if (
+          previous === "=" ||
+          previous === "!" ||
+          previous === "<" ||
+          previous === ">" ||
+          next === "=" ||
+          next === ">"
+        ) {
+          continue;
+        }
+      }
+
+      return { index: i, operator };
     }
   }
 
-  return -1;
-}
-
-function hasTopLevelEquals(text: string): boolean {
-  return findTopLevelChar(text, "=") >= 0;
+  return undefined;
 }
 
 function stripTopLevelDefaultValue(text: string): string {
@@ -2331,6 +4749,8 @@ function getCallArgumentCountAtOccurrence(
   }
 
   let depth = 0;
+  let bracketDepth = 0;
+  let braceDepth = 0;
   let topLevelCommas = 0;
   let sawValueToken = false;
   let inSingleQuote = false;
@@ -2391,7 +4811,26 @@ function getCallArgumentCountAtOccurrence(
       return topLevelCommas + 1;
     }
 
-    if (depth === 0 && ch === ",") {
+    if (ch === "[") {
+      bracketDepth += 1;
+      sawValueToken = true;
+      continue;
+    }
+    if (ch === "]") {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+      continue;
+    }
+    if (ch === "{") {
+      braceDepth += 1;
+      sawValueToken = true;
+      continue;
+    }
+    if (ch === "}") {
+      braceDepth = Math.max(0, braceDepth - 1);
+      continue;
+    }
+
+    if (depth === 0 && bracketDepth === 0 && braceDepth === 0 && ch === ",") {
       topLevelCommas += 1;
       sawValueToken = false;
       continue;
@@ -2453,7 +4892,7 @@ function extractParameterCountRange(
 
   let required = 0;
   for (const arg of args) {
-    if (!arg.includes("=")) {
+    if (findTopLevelEqualsIndex(arg) < 0) {
       required += 1;
     }
   }
@@ -2468,16 +4907,63 @@ function splitTopLevelByComma(text: string): string[] {
   const parts: string[] = [];
   let start = 0;
   let parenDepth = 0;
+  let bracketDepth = 0;
+  let braceDepth = 0;
   let angleDepth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escapeNext = false;
 
   for (let i = 0; i < text.length; i += 1) {
     const ch = text[i];
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (inSingleQuote || inDoubleQuote) {
+      if (ch === "\\") {
+        escapeNext = true;
+      } else if (inSingleQuote && ch === "'") {
+        inSingleQuote = false;
+      } else if (inDoubleQuote && ch === "\"") {
+        inDoubleQuote = false;
+      }
+      continue;
+    }
+
+    if (ch === "'") {
+      inSingleQuote = true;
+      continue;
+    }
+    if (ch === "\"") {
+      inDoubleQuote = true;
+      continue;
+    }
+
     if (ch === "(") {
       parenDepth += 1;
       continue;
     }
     if (ch === ")") {
       parenDepth = Math.max(0, parenDepth - 1);
+      continue;
+    }
+    if (ch === "[") {
+      bracketDepth += 1;
+      continue;
+    }
+    if (ch === "]") {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+      continue;
+    }
+    if (ch === "{") {
+      braceDepth += 1;
+      continue;
+    }
+    if (ch === "}") {
+      braceDepth = Math.max(0, braceDepth - 1);
       continue;
     }
     if (ch === "<") {
@@ -2488,7 +4974,13 @@ function splitTopLevelByComma(text: string): string[] {
       angleDepth = Math.max(0, angleDepth - 1);
       continue;
     }
-    if (ch === "," && parenDepth === 0 && angleDepth === 0) {
+    if (
+      ch === "," &&
+      parenDepth === 0 &&
+      bracketDepth === 0 &&
+      braceDepth === 0 &&
+      angleDepth === 0
+    ) {
       parts.push(text.slice(start, i).trim());
       start = i + 1;
     }
@@ -2498,15 +4990,84 @@ function splitTopLevelByComma(text: string): string[] {
   return parts.filter((part) => part.length > 0);
 }
 
-function isKnownTypeString(index: CompletionIndex, typeString: string): boolean {
+function isKnownTypeString(
+  index: CompletionIndex,
+  typeString: string | undefined,
+  knownTypeNames?: Set<string>
+): boolean {
   if (!typeString || typeString === "auto") {
     return true;
   }
 
-  return (
-    tryResolveTypeFullNameFromTypeString(index, typeString) !== undefined ||
-    isLanguageKeyword(typeString)
-  );
+  const candidates = expandTypeLookupCandidates(typeString);
+  for (const candidate of candidates) {
+    const compact = candidate.replace(/\s+/g, "");
+    const genericBase = compact.split("<")[0] ?? compact;
+    const shortName = candidate.split("::").pop() ?? candidate;
+
+    if (
+      knownTypeNames?.has(candidate) ||
+      knownTypeNames?.has(shortName) ||
+      isPrimitiveTypeName(candidate) ||
+      isPrimitiveTypeName(shortName) ||
+      isLanguageKeyword(candidate) ||
+      isLanguageKeyword(shortName) ||
+      intrinsicGenericTypeBases.has(genericBase.toLowerCase())
+    ) {
+      return true;
+    }
+
+    if (tryResolveTypeFullNameFromTypeString(index, candidate) !== undefined) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function expandTypeLookupCandidates(typeString: string): string[] {
+  const normalizedType = normalizeTypeText(typeString).trim();
+  if (!normalizedType) {
+    return [];
+  }
+
+  const candidates = new Set<string>();
+  const push = (value: string): void => {
+    const normalized = value.replace(/\s+/g, " ").trim();
+    if (!normalized) {
+      return;
+    }
+    candidates.add(normalized);
+  };
+
+  push(normalizedType);
+  push(stripTrailingIdentifierFromType(normalizedType));
+
+  const withoutQualifiers = normalizedType
+    .replace(/\b(const|in|out|inout)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  push(withoutQualifiers);
+  push(stripTrailingIdentifierFromType(withoutQualifiers));
+
+  for (const value of [...candidates]) {
+    push(value.replace(/(?:\s*[@&])+$/g, "").trim());
+  }
+
+  return [...candidates];
+}
+
+function stripTrailingIdentifierFromType(typeText: string): string {
+  const value = typeText.trim();
+  const trailingNameMatch = /^(.*\S)\s+([A-Za-z_][A-Za-z0-9_]*)$/.exec(value);
+  if (!trailingNameMatch) {
+    return value;
+  }
+  const maybeType = trailingNameMatch[1].trimEnd();
+  if (!maybeType) {
+    return value;
+  }
+  return maybeType;
 }
 
 function isNamespacePrefix(text: string, endOffset: number): boolean {
@@ -2526,7 +5087,230 @@ function looksLikeTypeContext(
 ): boolean {
   const lineText = getLineText(document, occurrence.range.start.line, lineTextCache);
   const after = lineText.slice(occurrence.range.end.character);
-  return /^\s+[A-Za-z_][A-Za-z0-9_]*\s*(?:[=;,\)\[])/.test(after);
+  let i = 0;
+  while (i < after.length && /\s/.test(after[i])) {
+    i += 1;
+  }
+  if (i >= after.length) {
+    return false;
+  }
+
+  if (after[i] === "<") {
+    let angleDepth = 0;
+    while (i < after.length) {
+      const ch = after[i];
+      if (ch === "<") {
+        angleDepth += 1;
+      } else if (ch === ">") {
+        angleDepth -= 1;
+        if (angleDepth === 0) {
+          i += 1;
+          break;
+        }
+      }
+      i += 1;
+    }
+    if (angleDepth !== 0) {
+      return false;
+    }
+    while (i < after.length && /\s/.test(after[i])) {
+      i += 1;
+    }
+    while (i < after.length && after[i] === ">") {
+      i += 1;
+      while (i < after.length && /\s/.test(after[i])) {
+        i += 1;
+      }
+    }
+  }
+
+  if (i < after.length && (after[i] === "@" || after[i] === "&")) {
+    i += 1;
+    while (i < after.length && /\s/.test(after[i])) {
+      i += 1;
+    }
+
+    const modeMatch = /^(inout|out|in)\b/.exec(after.slice(i));
+    if (modeMatch) {
+      i += modeMatch[1].length;
+      while (i < after.length && /\s/.test(after[i])) {
+        i += 1;
+      }
+    }
+  }
+
+  if (!isIdentifierStartChar(after[i])) {
+    return false;
+  }
+
+  i += 1;
+  while (i < after.length && isIdentifierPartChar(after[i])) {
+    i += 1;
+  }
+  while (i < after.length && /\s/.test(after[i])) {
+    i += 1;
+  }
+
+  const terminator = after[i] ?? "";
+  return terminator === "=" || terminator === ";" || terminator === "," || terminator === ")" || terminator === "[";
+}
+
+function isIdentifierStartChar(ch: string | undefined): boolean {
+  if (!ch) {
+    return false;
+  }
+  return /[A-Za-z_]/.test(ch);
+}
+
+function isIdentifierPartChar(ch: string | undefined): boolean {
+  if (!ch) {
+    return false;
+  }
+  return /[A-Za-z0-9_]/.test(ch);
+}
+
+function containsUnqualifiedIdentifierToken(text: string, name: string): boolean {
+  if (!text || !name) {
+    return false;
+  }
+
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`\\b${escapedName}\\b`, "g");
+  for (const match of text.matchAll(pattern)) {
+    const start = match.index ?? -1;
+    if (start < 0) {
+      continue;
+    }
+
+    let prev = start - 1;
+    while (prev >= 0 && /\s/.test(text[prev])) {
+      prev -= 1;
+    }
+    if (prev >= 0 && text[prev] === ".") {
+      continue;
+    }
+    if (prev >= 1 && text[prev] === ":" && text[prev - 1] === ":") {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+function isKnownNamespaceInUsingDirective(
+  document: TextDocument,
+  occurrence: DocumentAnalysis["occurrences"][number],
+  index: CompletionIndex,
+  lineTextCache?: Map<number, string>
+): boolean {
+  const lineText = getLineText(document, occurrence.range.start.line, lineTextCache);
+  const match =
+    /^\s*using\s+namespace\s+([A-Za-z_][A-Za-z0-9_]*(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)*)\s*;/.exec(
+      lineText
+    );
+  if (!match) {
+    return false;
+  }
+
+  const pathStart = lineText.indexOf(match[1]);
+  if (pathStart < 0) {
+    return false;
+  }
+
+  const pathEnd = pathStart + match[1].length;
+  if (
+    occurrence.range.start.character < pathStart ||
+    occurrence.range.end.character > pathEnd
+  ) {
+    return false;
+  }
+
+  const namespacePath = match[1]
+    .split("::")
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0)
+    .join("::");
+  if (!namespacePath) {
+    return false;
+  }
+
+  return (
+    index.namespaceBuckets.has(namespacePath) ||
+    index.namespaceChildren.has(namespacePath)
+  );
+}
+
+function isInsideImportParameterDeclaration(
+  analysis: DocumentAnalysis,
+  occurrence: DocumentAnalysis["occurrences"][number]
+): boolean {
+  for (const declaration of analysis.importFunctionDeclarations) {
+    if (
+      occurrence.start >= declaration.argsStart &&
+      occurrence.end <= declaration.argsEnd
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isInsideImportDeclaration(
+  analysis: DocumentAnalysis,
+  occurrence: DocumentAnalysis["occurrences"][number]
+): boolean {
+  for (const declaration of analysis.importFunctionDeclarations) {
+    if (
+      occurrence.start >= declaration.statementStart &&
+      occurrence.end <= declaration.statementEnd
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isKnownNamespaceQualifiedIdentifier(
+  document: TextDocument,
+  occurrence: DocumentAnalysis["occurrences"][number],
+  index: CompletionIndex,
+  lineTextCache?: Map<number, string>,
+  knownTypeNames?: Set<string>
+): boolean {
+  if (occurrence.qualifier !== "namespace") {
+    return false;
+  }
+
+  const lineText = getLineText(document, occurrence.range.start.line, lineTextCache);
+  const linePrefix = lineText.slice(0, occurrence.range.end.character);
+  const match =
+    /([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)$/.exec(linePrefix);
+  if (!match) {
+    return false;
+  }
+
+  const qualifiedName = match[1];
+  const parts = qualifiedName.split("::").filter((part) => part.length > 0);
+  if (parts.length < 2) {
+    return false;
+  }
+
+  const symbolName = parts[parts.length - 1];
+  if (symbolName !== occurrence.name) {
+    return false;
+  }
+
+  if (isKnownTypeName(index, qualifiedName, knownTypeNames)) {
+    return true;
+  }
+
+  const parentNamespace = parts.slice(0, -1).join("::");
+  const bucket = index.namespaceBuckets.get(parentNamespace);
+  if (!bucket) {
+    return false;
+  }
+
+  return bucket.items.some((item) => item.label === symbolName);
 }
 
 function findNextNonWhitespaceIndex(text: string, index: number): number {
@@ -2557,7 +5341,9 @@ function dedupeDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
       diagnostic.range.start.character,
       diagnostic.range.end.line,
       diagnostic.range.end.character,
-      diagnostic.code
+      diagnostic.severity ?? "none",
+      diagnostic.code ?? "none",
+      diagnostic.message
     ].join(":");
     if (seen.has(key)) {
       continue;
@@ -2567,265 +5353,6 @@ function dedupeDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
   }
 
   return deduped;
-}
-
-function collectDelimiterDiagnostics(
-  document: TextDocument,
-  maskedText: string
-): Diagnostic[] {
-  const diagnostics: Diagnostic[] = [];
-  const stack: Array<{ char: string; offset: number }> = [];
-
-  for (let i = 0; i < maskedText.length; i += 1) {
-    const ch = maskedText[i];
-    if (ch === "(" || ch === "[" || ch === "{") {
-      stack.push({ char: ch, offset: i });
-      continue;
-    }
-
-    if (ch !== ")" && ch !== "]" && ch !== "}") {
-      continue;
-    }
-
-    const expectedOpen = matchingOpenByClose[ch];
-    const top = stack[stack.length - 1];
-    if (top && top.char === expectedOpen) {
-      stack.pop();
-      continue;
-    }
-
-    const matchingOpenIndex = findLastMatchingOpenIndex(stack, expectedOpen);
-    if (matchingOpenIndex >= 0) {
-      for (let i = stack.length - 1; i > matchingOpenIndex; i -= 1) {
-        pushUnclosedDelimiterDiagnostic(document, diagnostics, stack[i]);
-      }
-      stack.length = matchingOpenIndex;
-      continue;
-    }
-
-    diagnostics.push({
-      severity: DiagnosticSeverity.Error,
-      range: offsetToSingleCharRange(document, i),
-      message: `Unexpected closing delimiter "${ch}"`,
-      source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
-      code: syntaxUnexpectedClosingDelimiterCode
-    });
-  }
-
-  for (const unclosed of stack) {
-    pushUnclosedDelimiterDiagnostic(document, diagnostics, unclosed);
-  }
-
-  return diagnostics;
-}
-
-function findLastMatchingOpenIndex(
-  stack: Array<{ char: string; offset: number }>,
-  expectedOpen: string
-): number {
-  for (let i = stack.length - 1; i >= 0; i -= 1) {
-    if (stack[i].char === expectedOpen) {
-      return i;
-    }
-  }
-
-  return -1;
-}
-
-function pushUnclosedDelimiterDiagnostic(
-  document: TextDocument,
-  diagnostics: Diagnostic[],
-  unclosed: { char: string; offset: number }
-): void {
-  diagnostics.push({
-    severity: DiagnosticSeverity.Error,
-    range: offsetToSingleCharRange(document, unclosed.offset),
-    message: `Unclosed delimiter "${unclosed.char}" (expected "${matchingCloseByOpen[unclosed.char]}")`,
-    source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
-    code: syntaxUnclosedDelimiterCode
-  });
-}
-
-function collectUnterminatedLiteralDiagnostics(
-  document: TextDocument
-): Diagnostic[] {
-  const diagnostics: Diagnostic[] = [];
-  const text = document.getText();
-
-  let inLineComment = false;
-  let inBlockComment = false;
-  let inSingleQuote = false;
-  let inDoubleQuote = false;
-  let escapeNext = false;
-  let blockCommentStartOffset = -1;
-  let singleQuoteStartOffset = -1;
-  let doubleQuoteStartOffset = -1;
-
-  for (let i = 0; i < text.length; i += 1) {
-    const ch = text[i];
-    const next = i + 1 < text.length ? text[i + 1] : "";
-
-    if (inLineComment) {
-      if (ch === "\n") {
-        inLineComment = false;
-      }
-      continue;
-    }
-
-    if (inBlockComment) {
-      if (ch === "*" && next === "/") {
-        inBlockComment = false;
-        i += 1;
-      }
-      continue;
-    }
-
-    if (inSingleQuote) {
-      if (escapeNext) {
-        escapeNext = false;
-        continue;
-      }
-      if (ch === "\\") {
-        escapeNext = true;
-        continue;
-      }
-      if (ch === "'") {
-        inSingleQuote = false;
-        continue;
-      }
-      if (ch === "\n" || ch === "\r") {
-        diagnostics.push({
-          severity: DiagnosticSeverity.Error,
-          range: offsetToSingleCharRange(document, singleQuoteStartOffset),
-          message: "Unterminated single-quoted literal",
-          source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
-          code: syntaxUnterminatedStringCode
-        });
-        inSingleQuote = false;
-        escapeNext = false;
-      }
-      continue;
-    }
-
-    if (inDoubleQuote) {
-      if (escapeNext) {
-        escapeNext = false;
-        continue;
-      }
-      if (ch === "\\") {
-        escapeNext = true;
-        continue;
-      }
-      if (ch === "\"") {
-        inDoubleQuote = false;
-        continue;
-      }
-      if (ch === "\n" || ch === "\r") {
-        diagnostics.push({
-          severity: DiagnosticSeverity.Error,
-          range: offsetToSingleCharRange(document, doubleQuoteStartOffset),
-          message: "Unterminated double-quoted literal",
-          source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
-          code: syntaxUnterminatedStringCode
-        });
-        inDoubleQuote = false;
-        escapeNext = false;
-      }
-      continue;
-    }
-
-    if (ch === "/" && next === "/") {
-      inLineComment = true;
-      i += 1;
-      continue;
-    }
-
-    if (ch === "/" && next === "*") {
-      inBlockComment = true;
-      blockCommentStartOffset = i;
-      i += 1;
-      continue;
-    }
-
-    if (ch === "'") {
-      inSingleQuote = true;
-      singleQuoteStartOffset = i;
-      continue;
-    }
-
-    if (ch === "\"") {
-      inDoubleQuote = true;
-      doubleQuoteStartOffset = i;
-      continue;
-    }
-  }
-
-  if (inBlockComment) {
-    diagnostics.push({
-      severity: DiagnosticSeverity.Error,
-      range: offsetToRange(document, blockCommentStartOffset, blockCommentStartOffset + 2),
-      message: "Unterminated block comment",
-      source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
-      code: syntaxUnterminatedBlockCommentCode
-    });
-  }
-
-  if (inSingleQuote) {
-    diagnostics.push({
-      severity: DiagnosticSeverity.Error,
-      range: offsetToSingleCharRange(document, singleQuoteStartOffset),
-      message: "Unterminated single-quoted literal",
-      source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
-      code: syntaxUnterminatedStringCode
-    });
-  }
-
-  if (inDoubleQuote) {
-    diagnostics.push({
-      severity: DiagnosticSeverity.Error,
-      range: offsetToSingleCharRange(document, doubleQuoteStartOffset),
-      message: "Unterminated double-quoted literal",
-      source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
-      code: syntaxUnterminatedStringCode
-    });
-  }
-
-  return diagnostics;
-}
-
-function collectGrammarDiagnostics(
-  document: TextDocument,
-  analysis: DocumentAnalysis,
-  parserSettings: ParserSettings
-): Diagnostic[] {
-  if (
-    !parserSettings.enableUnparsableStatementDiagnostics ||
-    parserSettings.maxDiagnostics <= 0 ||
-    analysis.grammarErrors.length === 0
-  ) {
-    return [];
-  }
-
-  const diagnostics: Diagnostic[] = [];
-  for (const error of analysis.grammarErrors) {
-    if (diagnostics.length >= parserSettings.maxDiagnostics) {
-      break;
-    }
-
-    const end = Math.max(error.start + 1, error.end);
-    diagnostics.push({
-      severity: DiagnosticSeverity.Error,
-      range: {
-        start: document.positionAt(error.start),
-        end: document.positionAt(end)
-      },
-      message: error.message,
-      source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
-      code: syntaxUnparsableStatementCode
-    });
-  }
-
-  return diagnostics;
 }
 
 function offsetToSingleCharRange(
@@ -2930,7 +5457,19 @@ function getLineText(
   return lineText;
 }
 
-function isKnownTypeName(index: CompletionIndex, identifier: string): boolean {
+function isKnownTypeName(
+  index: CompletionIndex,
+  identifier: string,
+  knownTypeNames?: Set<string>
+): boolean {
+  if (knownTypeNames?.has(identifier)) {
+    return true;
+  }
+
+  if (isPrimitiveTypeName(identifier)) {
+    return true;
+  }
+
   if (index.typeInfoByFullName.has(identifier)) {
     return true;
   }
@@ -2953,6 +5492,36 @@ function isInsideAttributeBrackets(
   }
 
   return after.indexOf("]") >= 0;
+}
+
+function isInsidePreprocessorDirectiveLine(
+  document: TextDocument,
+  range: Diagnostic["range"],
+  lineTextCache?: Map<number, string>
+): boolean {
+  const lineText = getLineText(document, range.start.line, lineTextCache).trimStart();
+  return lineText.startsWith("#");
+}
+
+function shouldSuppressPreprocessorDuplicateFunctionDiagnostic(
+  document: TextDocument,
+  diagnostic: Diagnostic,
+  lineTextCache?: Map<number, string>
+): boolean {
+  if (diagnostic.code !== "binding-duplicate-declaration") {
+    return false;
+  }
+
+  if (!/Duplicate function declaration/.test(diagnostic.message)) {
+    return false;
+  }
+
+  const text = document.getText();
+  if (!/#\s*if\b/.test(text) || !/#\s*else\b/.test(text)) {
+    return false;
+  }
+
+  return !isInsidePreprocessorDirectiveLine(document, diagnostic.range, lineTextCache);
 }
 
 function toDiagnosticData(value: unknown): DiagnosticData {

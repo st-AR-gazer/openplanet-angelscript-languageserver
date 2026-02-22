@@ -1,0 +1,25 @@
+{
+  "defaults": {
+    "suite": "ExampleSuite",
+    "strictDiagnosticText": true,
+    "transport": "auto",
+    "timeoutSec": 20,
+    "waitFrames": 20,
+    "companionHost": "127.0.0.1",
+    "companionPort": 32000
+  },
+  "entries": [
+    {
+      "id": "openplanet-next-current",
+      "snapshotKey": "openplanet-next-current",
+      "suite": "ExampleSuite",
+      "fixturesPath": "D:\\OpenplanetDev\\suites\\ExampleSuite\\conformance\\generated\\primitive-matrix.oracle.jsonl"
+    },
+    {
+      "id": "openplanet-next-preview",
+      "snapshotKey": "openplanet-next-preview",
+      "suite": "ExampleSuitePreview",
+      "fixturesPath": "D:\\OpenplanetDev\\suites\\ExampleSuitePreview\\conformance\\generated\\primitive-matrix.oracle.jsonl"
+    }
+  ]
+}

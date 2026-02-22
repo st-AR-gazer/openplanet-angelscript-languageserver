@@ -1,0 +1,506 @@
+{
+  "ts_utc": "2026-02-22T00:36:26.523Z",
+  "source": "https://raw.githubusercontent.com/anjo76/angelscript/master/sdk/angelscript/source/as_tokendef.h",
+  "reserved_keywords": [
+    "and",
+    "auto",
+    "bool",
+    "break",
+    "case",
+    "cast",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "default",
+    "do",
+    "double",
+    "else",
+    "enum",
+    "false",
+    "float",
+    "for",
+    "foreach",
+    "funcdef",
+    "if",
+    "import",
+    "in",
+    "inout",
+    "int",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "interface",
+    "is",
+    "mixin",
+    "namespace",
+    "not",
+    "null",
+    "or",
+    "out",
+    "private",
+    "protected",
+    "return",
+    "switch",
+    "true",
+    "try",
+    "typedef",
+    "uint",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "using",
+    "void",
+    "while",
+    "xor"
+  ],
+  "contextual_keywords": [
+    "this",
+    "from",
+    "super",
+    "shared",
+    "final",
+    "override",
+    "get",
+    "set",
+    "abstract",
+    "function",
+    "if_handle_then_const",
+    "external",
+    "explicit",
+    "property",
+    "delete"
+  ],
+  "token_words": [
+    {
+      "text": "+",
+      "tokenType": "ttPlus"
+    },
+    {
+      "text": "+=",
+      "tokenType": "ttAddAssign"
+    },
+    {
+      "text": "++",
+      "tokenType": "ttInc"
+    },
+    {
+      "text": "-",
+      "tokenType": "ttMinus"
+    },
+    {
+      "text": "-=",
+      "tokenType": "ttSubAssign"
+    },
+    {
+      "text": "--",
+      "tokenType": "ttDec"
+    },
+    {
+      "text": "*",
+      "tokenType": "ttStar"
+    },
+    {
+      "text": "*=",
+      "tokenType": "ttMulAssign"
+    },
+    {
+      "text": "/",
+      "tokenType": "ttSlash"
+    },
+    {
+      "text": "/=",
+      "tokenType": "ttDivAssign"
+    },
+    {
+      "text": "%",
+      "tokenType": "ttPercent"
+    },
+    {
+      "text": "%=",
+      "tokenType": "ttModAssign"
+    },
+    {
+      "text": "**",
+      "tokenType": "ttStarStar"
+    },
+    {
+      "text": "**=",
+      "tokenType": "ttPowAssign"
+    },
+    {
+      "text": "=",
+      "tokenType": "ttAssignment"
+    },
+    {
+      "text": "==",
+      "tokenType": "ttEqual"
+    },
+    {
+      "text": ".",
+      "tokenType": "ttDot"
+    },
+    {
+      "text": "...",
+      "tokenType": "ttVariadic"
+    },
+    {
+      "text": "|",
+      "tokenType": "ttBitOr"
+    },
+    {
+      "text": "|=",
+      "tokenType": "ttOrAssign"
+    },
+    {
+      "text": "||",
+      "tokenType": "ttOr"
+    },
+    {
+      "text": "&",
+      "tokenType": "ttAmp"
+    },
+    {
+      "text": "&=",
+      "tokenType": "ttAndAssign"
+    },
+    {
+      "text": "&&",
+      "tokenType": "ttAnd"
+    },
+    {
+      "text": "^",
+      "tokenType": "ttBitXor"
+    },
+    {
+      "text": "^=",
+      "tokenType": "ttXorAssign"
+    },
+    {
+      "text": "^^",
+      "tokenType": "ttXor"
+    },
+    {
+      "text": "<",
+      "tokenType": "ttLessThan"
+    },
+    {
+      "text": "<=",
+      "tokenType": "ttLessThanOrEqual"
+    },
+    {
+      "text": "<<",
+      "tokenType": "ttBitShiftLeft"
+    },
+    {
+      "text": "<<=",
+      "tokenType": "ttShiftLeftAssign"
+    },
+    {
+      "text": ">",
+      "tokenType": "ttGreaterThan"
+    },
+    {
+      "text": ">=",
+      "tokenType": "ttGreaterThanOrEqual"
+    },
+    {
+      "text": ">>",
+      "tokenType": "ttBitShiftRight"
+    },
+    {
+      "text": ">>=",
+      "tokenType": "ttShiftRightLAssign"
+    },
+    {
+      "text": ">>>",
+      "tokenType": "ttBitShiftRightArith"
+    },
+    {
+      "text": ">>>=",
+      "tokenType": "ttShiftRightAAssign"
+    },
+    {
+      "text": "~",
+      "tokenType": "ttBitNot"
+    },
+    {
+      "text": ";",
+      "tokenType": "ttEndStatement"
+    },
+    {
+      "text": ",",
+      "tokenType": "ttListSeparator"
+    },
+    {
+      "text": "{",
+      "tokenType": "ttStartStatementBlock"
+    },
+    {
+      "text": "}",
+      "tokenType": "ttEndStatementBlock"
+    },
+    {
+      "text": "(",
+      "tokenType": "ttOpenParenthesis"
+    },
+    {
+      "text": ")",
+      "tokenType": "ttCloseParenthesis"
+    },
+    {
+      "text": "[",
+      "tokenType": "ttOpenBracket"
+    },
+    {
+      "text": "]",
+      "tokenType": "ttCloseBracket"
+    },
+    {
+      "text": "?",
+      "tokenType": "ttQuestion"
+    },
+    {
+      "text": ":",
+      "tokenType": "ttColon"
+    },
+    {
+      "text": "::",
+      "tokenType": "ttScope"
+    },
+    {
+      "text": "!",
+      "tokenType": "ttNot"
+    },
+    {
+      "text": "!=",
+      "tokenType": "ttNotEqual"
+    },
+    {
+      "text": "!is",
+      "tokenType": "ttNotIs"
+    },
+    {
+      "text": "@",
+      "tokenType": "ttHandle"
+    },
+    {
+      "text": "and",
+      "tokenType": "ttAnd"
+    },
+    {
+      "text": "auto",
+      "tokenType": "ttAuto"
+    },
+    {
+      "text": "bool",
+      "tokenType": "ttBool"
+    },
+    {
+      "text": "break",
+      "tokenType": "ttBreak"
+    },
+    {
+      "text": "case",
+      "tokenType": "ttCase"
+    },
+    {
+      "text": "cast",
+      "tokenType": "ttCast"
+    },
+    {
+      "text": "catch",
+      "tokenType": "ttCatch"
+    },
+    {
+      "text": "class",
+      "tokenType": "ttClass"
+    },
+    {
+      "text": "const",
+      "tokenType": "ttConst"
+    },
+    {
+      "text": "continue",
+      "tokenType": "ttContinue"
+    },
+    {
+      "text": "default",
+      "tokenType": "ttDefault"
+    },
+    {
+      "text": "do",
+      "tokenType": "ttDo"
+    },
+    {
+      "text": "double",
+      "tokenType": "ttFloat"
+    },
+    {
+      "text": "double",
+      "tokenType": "ttDouble"
+    },
+    {
+      "text": "else",
+      "tokenType": "ttElse"
+    },
+    {
+      "text": "enum",
+      "tokenType": "ttEnum"
+    },
+    {
+      "text": "false",
+      "tokenType": "ttFalse"
+    },
+    {
+      "text": "float",
+      "tokenType": "ttFloat"
+    },
+    {
+      "text": "for",
+      "tokenType": "ttFor"
+    },
+    {
+      "text": "foreach",
+      "tokenType": "ttForEach"
+    },
+    {
+      "text": "funcdef",
+      "tokenType": "ttFuncDef"
+    },
+    {
+      "text": "if",
+      "tokenType": "ttIf"
+    },
+    {
+      "text": "import",
+      "tokenType": "ttImport"
+    },
+    {
+      "text": "in",
+      "tokenType": "ttIn"
+    },
+    {
+      "text": "inout",
+      "tokenType": "ttInOut"
+    },
+    {
+      "text": "int",
+      "tokenType": "ttInt"
+    },
+    {
+      "text": "int8",
+      "tokenType": "ttInt8"
+    },
+    {
+      "text": "int16",
+      "tokenType": "ttInt16"
+    },
+    {
+      "text": "int32",
+      "tokenType": "ttInt"
+    },
+    {
+      "text": "int64",
+      "tokenType": "ttInt64"
+    },
+    {
+      "text": "interface",
+      "tokenType": "ttInterface"
+    },
+    {
+      "text": "is",
+      "tokenType": "ttIs"
+    },
+    {
+      "text": "mixin",
+      "tokenType": "ttMixin"
+    },
+    {
+      "text": "namespace",
+      "tokenType": "ttNamespace"
+    },
+    {
+      "text": "not",
+      "tokenType": "ttNot"
+    },
+    {
+      "text": "null",
+      "tokenType": "ttNull"
+    },
+    {
+      "text": "or",
+      "tokenType": "ttOr"
+    },
+    {
+      "text": "out",
+      "tokenType": "ttOut"
+    },
+    {
+      "text": "private",
+      "tokenType": "ttPrivate"
+    },
+    {
+      "text": "protected",
+      "tokenType": "ttProtected"
+    },
+    {
+      "text": "return",
+      "tokenType": "ttReturn"
+    },
+    {
+      "text": "switch",
+      "tokenType": "ttSwitch"
+    },
+    {
+      "text": "true",
+      "tokenType": "ttTrue"
+    },
+    {
+      "text": "try",
+      "tokenType": "ttTry"
+    },
+    {
+      "text": "typedef",
+      "tokenType": "ttTypedef"
+    },
+    {
+      "text": "uint",
+      "tokenType": "ttUInt"
+    },
+    {
+      "text": "uint8",
+      "tokenType": "ttUInt8"
+    },
+    {
+      "text": "uint16",
+      "tokenType": "ttUInt16"
+    },
+    {
+      "text": "uint32",
+      "tokenType": "ttUInt"
+    },
+    {
+      "text": "uint64",
+      "tokenType": "ttUInt64"
+    },
+    {
+      "text": "using",
+      "tokenType": "ttUsing"
+    },
+    {
+      "text": "void",
+      "tokenType": "ttVoid"
+    },
+    {
+      "text": "while",
+      "tokenType": "ttWhile"
+    },
+    {
+      "text": "xor",
+      "tokenType": "ttXor"
+    }
+  ]
+}
