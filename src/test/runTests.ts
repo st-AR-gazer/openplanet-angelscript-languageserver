@@ -27,6 +27,7 @@ import { getHoverAtPosition } from "../server/hover";
 import { getInlayHints } from "../server/inlayHints";
 import { getIncludeDiagnostics } from "../server/includes";
 import { getImportDiagnostics } from "../server/imports";
+import { getInlineValuesForRange } from "../server/inlineValues";
 import { getCodeLensesForDocument } from "../server/codeLenses";
 import { getDocumentColors, getColorPresentations } from "../server/colors";
 import { tryResolveExpressionTypeFullName } from "../server/members";
@@ -120,6 +121,8 @@ async function main(): Promise<void> {
   testQualifiedSignatureHelp(index);
   testSignatureHelpSelectsOverload(index);
   testInlayHints(index);
+  testCompletionShortcuts(index);
+  testInlineValueCategoryToggles();
   testDocumentHighlights();
   testWorkspaceSymbols();
   testTypeDefinitionWorkspaceType(index);
@@ -179,6 +182,124 @@ function testTypeResolution(index: ReturnType<typeof createCompletionIndex>): vo
     resolvedType,
     "MwId",
     "Expected local variable type resolution across chained members."
+  );
+}
+
+function testCompletionShortcuts(index: ReturnType<typeof createCompletionIndex>): void {
+  const withoutShortcuts = collectCompletionItems(index, undefined, {
+    math: false,
+    ui: false,
+    mathX: false,
+    ux: false,
+    mat: false,
+    quat: false,
+    string: false
+  });
+  assert.ok(
+    !withoutShortcuts.some((item) => item.label === "Rotate"),
+    "Expected mat4::Rotate to be absent when completion shortcuts are disabled."
+  );
+
+  const withMatShortcut = collectCompletionItems(index, undefined, {
+    math: false,
+    ui: false,
+    mathX: false,
+    ux: false,
+    mat: true,
+    quat: false,
+    string: false
+  });
+  const rotate = withMatShortcut.find((item) => item.label === "Rotate");
+  assert.ok(
+    rotate,
+    "Expected mat4::Rotate to be surfaced when mat shortcut completion is enabled."
+  );
+  assert.ok(
+    rotate?.detail?.includes("shortcut"),
+    "Expected shortcut completion entries to include shortcut context in detail."
+  );
+}
+
+function testInlineValueCategoryToggles(): void {
+  const source = [
+    "class Sample {",
+    "  int value;",
+    "  void Tick(int amount) {",
+    "    int local = amount;",
+    "    this.value = local;",
+    "  }",
+    "}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///inline-values-toggles.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+  const fullRange = {
+    start: { line: 0, character: 0 },
+    end: document.positionAt(source.length)
+  };
+
+  const allEnabled = getInlineValuesForRange(document, analysis, fullRange, {
+    enable: true,
+    showInlineValueForLocalVariables: true,
+    showInlineValueForParameters: true,
+    showInlineValueForMemberAssignment: true,
+    showInlineValueForFunctionThisObject: true
+  });
+  const variableLookups = allEnabled.filter(
+    (value) => value.kind === "variableLookup"
+  );
+  const expressions = allEnabled.filter(
+    (value) => value.kind === "evaluatableExpression"
+  );
+
+  assert.ok(
+    variableLookups.some((value) => value.variableName === "amount"),
+    "Expected parameter inline value when parameter category is enabled."
+  );
+  assert.ok(
+    variableLookups.some((value) => value.variableName === "local"),
+    "Expected local inline value when local category is enabled."
+  );
+  assert.ok(
+    expressions.some((value) => value.expression === "this.value"),
+    "Expected member-assignment inline expression when member-assignment category is enabled."
+  );
+  assert.ok(
+    expressions.some((value) => value.expression === "this"),
+    "Expected function this-object inline expression when function-this category is enabled."
+  );
+
+  const allDisabled = getInlineValuesForRange(document, analysis, fullRange, {
+    enable: false,
+    showInlineValueForLocalVariables: true,
+    showInlineValueForParameters: true,
+    showInlineValueForMemberAssignment: true,
+    showInlineValueForFunctionThisObject: true
+  });
+  assert.strictEqual(
+    allDisabled.length,
+    0,
+    "Expected no inline values when inline value feature is globally disabled."
+  );
+
+  const memberThisDisabled = getInlineValuesForRange(document, analysis, fullRange, {
+    enable: true,
+    showInlineValueForLocalVariables: true,
+    showInlineValueForParameters: true,
+    showInlineValueForMemberAssignment: false,
+    showInlineValueForFunctionThisObject: false
+  });
+  assert.ok(
+    !memberThisDisabled.some(
+      (value) =>
+        value.kind === "evaluatableExpression" &&
+        (value.expression === "this" || value.expression === "this.value")
+    ),
+    "Expected no this/member assignment expressions when those categories are disabled."
   );
 }
 

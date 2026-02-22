@@ -105,6 +105,8 @@ export function getSyntaxDiagnostics(
   const effectiveParserSettings: ParserSettings = {
     enableUnparsableStatementDiagnostics:
       parserSettings?.enableUnparsableStatementDiagnostics ?? true,
+    enableDebugOutput: parserSettings?.enableDebugOutput ?? false,
+    crashOnParseError: parserSettings?.crashOnParseError ?? false,
     maxDiagnostics: parserSettings?.maxDiagnostics ?? 200
   };
 

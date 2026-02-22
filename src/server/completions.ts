@@ -3,7 +3,11 @@ import {
   CompletionItemKind
 } from "vscode-languageserver/node";
 import type { TextDocument } from "vscode-languageserver-textdocument";
-import type { CompletionBucket, CompletionIndex } from "./types";
+import type {
+  CompletionBucket,
+  CompletionIndex,
+  CompletionShortcutSettings
+} from "./types";
 
 const ROOT_NAMESPACE = "<root>";
 
@@ -406,7 +410,8 @@ function isDeclarationModifier(token: string): boolean {
 
 export function collectCompletionItems(
   index: CompletionIndex,
-  activeNamespace: string | undefined
+  activeNamespace: string | undefined,
+  shortcuts?: CompletionShortcutSettings
 ): CompletionItem[] {
   const items: CompletionItem[] = [];
 
@@ -419,10 +424,11 @@ export function collectCompletionItems(
   } else {
     items.push(...getNamespaceChildCompletionItems(index, undefined));
     items.push(...index.global.items);
+    items.push(...collectShortcutCompletionItems(index, shortcuts));
   }
 
   items.push(...keywordCompletionItems);
-  return items;
+  return dedupeCompletionItems(items);
 }
 
 function getNamespaceChildCompletionItems(
@@ -505,4 +511,114 @@ export function resolveCompletionItemDetails(item: CompletionItem): CompletionIt
   };
 
   return resolved;
+}
+
+function collectShortcutCompletionItems(
+  index: CompletionIndex,
+  shortcuts: CompletionShortcutSettings | undefined
+): CompletionItem[] {
+  if (!shortcuts) {
+    return [];
+  }
+
+  const namespaceShortcuts = getEnabledShortcutNamespaces(shortcuts);
+  if (namespaceShortcuts.length === 0) {
+    return [];
+  }
+
+  const shortcutItems: CompletionItem[] = [];
+  for (const namespace of namespaceShortcuts) {
+    const bucket = index.namespaceBuckets.get(namespace);
+    if (!bucket || bucket.items.length === 0) {
+      continue;
+    }
+
+    for (const item of bucket.items) {
+      if (item.kind !== CompletionItemKind.Function) {
+        continue;
+      }
+
+      shortcutItems.push(withShortcutNamespaceItem(item, namespace));
+    }
+  }
+
+  return shortcutItems;
+}
+
+function getEnabledShortcutNamespaces(
+  shortcuts: CompletionShortcutSettings
+): string[] {
+  const namespaces: string[] = [];
+  if (shortcuts.math) {
+    namespaces.push("Math");
+  }
+  if (shortcuts.ui) {
+    namespaces.push("UI");
+  }
+  if (shortcuts.mathX) {
+    namespaces.push("MathX");
+  }
+  if (shortcuts.ux) {
+    namespaces.push("UX");
+  }
+  if (shortcuts.mat) {
+    namespaces.push("mat4");
+  }
+  if (shortcuts.quat) {
+    namespaces.push("quat");
+  }
+  if (shortcuts.string) {
+    namespaces.push("string");
+  }
+  return namespaces;
+}
+
+function withShortcutNamespaceItem(
+  item: CompletionItem,
+  namespace: string
+): CompletionItem {
+  const descriptionSuffix = `${namespace}:: shortcut`;
+  const dataRecord =
+    typeof item.data === "object" && item.data !== null
+      ? ({ ...(item.data as Record<string, unknown>) } as Record<string, unknown>)
+      : {};
+  dataRecord.shortcutNamespace = namespace;
+
+  const detail = item.detail
+    ? `${item.detail} [${descriptionSuffix}]`
+    : descriptionSuffix;
+  const labelDetails = item.labelDetails
+    ? {
+        ...item.labelDetails,
+        description: item.labelDetails.description
+          ? `${item.labelDetails.description} | ${namespace}::`
+          : `${namespace}::`
+      }
+    : { description: `${namespace}::` };
+
+  return {
+    ...item,
+    detail,
+    labelDetails,
+    data: dataRecord
+  };
+}
+
+function dedupeCompletionItems(items: CompletionItem[]): CompletionItem[] {
+  const output: CompletionItem[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    const key = [
+      item.label,
+      item.kind ?? "",
+      item.detail ?? "",
+      item.labelDetails?.description ?? ""
+    ].join("|");
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    output.push(item);
+  }
+  return output;
 }

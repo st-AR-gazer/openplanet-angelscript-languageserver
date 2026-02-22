@@ -28,7 +28,14 @@
   "main": "./out/extension.js",
   "activationEvents": [
     "onLanguage:openplanet-angelscript",
-    "onCommand:openplanetLanguageServer.restartServer"
+    "onCommand:openplanetLanguageServer.restartServer",
+    "onCommand:openplanetLanguageServer.reloadInfoToml",
+    "onCommand:openplanetLanguageServer.copyImportPath",
+    "onCommand:openplanetLanguageServer.addImport",
+    "onCommand:openplanetLanguageServer.quickOpenImport",
+    "onCommand:openplanetLanguageServer.goToSymbol",
+    "onCommand:openplanetLanguageServer.parenCompletion",
+    "onDebugResolve:openplanet-angelscript"
   ],
   "extensionDependencies": [
     "ar.openplanet-angelscript-syntax"
@@ -38,6 +45,30 @@
       {
         "command": "openplanetLanguageServer.restartServer",
         "title": "Openplanet Language Server: Restart"
+      },
+      {
+        "command": "openplanetLanguageServer.reloadInfoToml",
+        "title": "Openplanet Language Server: Reload info.toml Dependencies"
+      },
+      {
+        "command": "openplanetLanguageServer.copyImportPath",
+        "title": "Openplanet Language Server: Copy Import Path"
+      },
+      {
+        "command": "openplanetLanguageServer.addImport",
+        "title": "Openplanet Language Server: Add Import"
+      },
+      {
+        "command": "openplanetLanguageServer.quickOpenImport",
+        "title": "Openplanet Language Server: Quick Open Import"
+      },
+      {
+        "command": "openplanetLanguageServer.goToSymbol",
+        "title": "Openplanet Language Server: Go To Symbol"
+      },
+      {
+        "command": "openplanetLanguageServer.parenCompletion",
+        "title": "Openplanet Language Server: Completion Paren Helper"
       }
     ],
     "keybindings": [
@@ -50,6 +81,57 @@
         "command": "toggleSuggestionDetails",
         "key": "left",
         "when": "textInputFocus && suggestWidgetVisible && suggestWidgetHasFocusedSuggestion && !suggestWidgetDetailsVisible"
+      },
+      {
+        "command": "openplanetLanguageServer.goToSymbol",
+        "key": "alt+g",
+        "when": "editorTextFocus && editorLangId == openplanet-angelscript"
+      },
+      {
+        "command": "openplanetLanguageServer.addImport",
+        "key": "alt+shift+i",
+        "when": "editorTextFocus && editorLangId == openplanet-angelscript"
+      },
+      {
+        "command": "openplanetLanguageServer.quickOpenImport",
+        "key": "alt+e",
+        "when": "editorTextFocus && editorLangId == openplanet-angelscript"
+      },
+      {
+        "command": "openplanetLanguageServer.parenCompletion",
+        "key": "(",
+        "when": "textInputFocus && editorLangId == openplanet-angelscript && suggestWidgetVisible && suggestWidgetHasFocusedSuggestion && config.openplanetLanguageServer.completion.insertParenthesesOnFunctionCompletion"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "when": "resourceLangId == openplanet-angelscript",
+          "command": "openplanetLanguageServer.copyImportPath",
+          "group": "5_cutcopypaste"
+        }
+      ],
+      "editor/context": [
+        {
+          "when": "editorLangId == openplanet-angelscript",
+          "command": "openplanetLanguageServer.goToSymbol",
+          "group": "navigation@1"
+        },
+        {
+          "when": "editorLangId == openplanet-angelscript",
+          "command": "openplanetLanguageServer.addImport",
+          "group": "navigation@2"
+        },
+        {
+          "when": "editorLangId == openplanet-angelscript",
+          "command": "openplanetLanguageServer.quickOpenImport",
+          "group": "navigation@3"
+        }
+      ]
+    },
+    "breakpoints": [
+      {
+        "language": "openplanet-angelscript"
       }
     ],
     "configuration": {
@@ -102,6 +184,16 @@
           "type": "boolean",
           "default": true,
           "description": "Report diagnostics when the parser cannot recover a valid statement/declaration structure."
+        },
+        "openplanetLanguageServer.parser.enableDebugOutput": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log parser error details to the language server output channel for debugging."
+        },
+        "openplanetLanguageServer.parser.crashOnParseError": {
+          "type": "boolean",
+          "default": false,
+          "description": "Developer mode: intentionally crash the server when parser errors are encountered."
         },
         "openplanetLanguageServer.parser.maxDiagnostics": {
           "type": "number",
@@ -195,6 +287,46 @@
           "minimum": 50,
           "description": "Maximum completion items returned per request."
         },
+        "openplanetLanguageServer.completion.shortcuts.math": {
+          "type": "boolean",
+          "default": true,
+          "description": "Suggest Math:: function names without requiring the namespace prefix."
+        },
+        "openplanetLanguageServer.completion.shortcuts.ui": {
+          "type": "boolean",
+          "default": true,
+          "description": "Suggest UI:: function names without requiring the namespace prefix."
+        },
+        "openplanetLanguageServer.completion.shortcuts.mathX": {
+          "type": "boolean",
+          "default": true,
+          "description": "Suggest MathX:: function names without requiring the namespace prefix."
+        },
+        "openplanetLanguageServer.completion.shortcuts.ux": {
+          "type": "boolean",
+          "default": true,
+          "description": "Suggest UX:: function names without requiring the namespace prefix."
+        },
+        "openplanetLanguageServer.completion.shortcuts.mat": {
+          "type": "boolean",
+          "default": true,
+          "description": "Suggest mat4:: function names without requiring the namespace prefix."
+        },
+        "openplanetLanguageServer.completion.shortcuts.quat": {
+          "type": "boolean",
+          "default": true,
+          "description": "Suggest quat:: function names without requiring the namespace prefix."
+        },
+        "openplanetLanguageServer.completion.shortcuts.string": {
+          "type": "boolean",
+          "default": true,
+          "description": "Suggest string:: function names without requiring the namespace prefix."
+        },
+        "openplanetLanguageServer.completion.insertParenthesesOnFunctionCompletion": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable the paren helper keybinding that accepts completion and inserts ()."
+        },
         "openplanetLanguageServer.inlayHints.enable": {
           "type": "boolean",
           "default": true,
@@ -249,6 +381,31 @@
           },
           "default": [],
           "description": "Function names included in this list are ignored for parameter inlay hints."
+        },
+        "openplanetLanguageServer.inlineValues.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable inline values provided by the language server while debugging."
+        },
+        "openplanetLanguageServer.inlineValues.showInlineValueForLocalVariables": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inline values for local variable declarations."
+        },
+        "openplanetLanguageServer.inlineValues.showInlineValueForParameters": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inline values for function parameter declarations."
+        },
+        "openplanetLanguageServer.inlineValues.showInlineValueForMemberAssignment": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inline evaluatable expressions for assignments to this.member."
+        },
+        "openplanetLanguageServer.inlineValues.showInlineValueForFunctionThisObject": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inline evaluatable expression for this near member-function declarations."
         },
         "openplanetLanguageServer.semanticTokens.enable": {
           "type": "boolean",

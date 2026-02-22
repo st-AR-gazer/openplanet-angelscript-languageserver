@@ -154,15 +154,21 @@ const includeScopeCache = new Map<string, { generation: number; uris: string[] }
 const semanticTokenSnapshots = new Map<string, SemanticTokenSnapshot>();
 let semanticTokenResultCounter = 0;
 const publishedDiagnosticsByUri = new Map<string, Diagnostic[]>();
+const parserDebugLoggedVersionByUri = new Map<string, number>();
 
 const provideInlineValuesRequest = "openplanet/provideInlineValues";
 const provideFileDecorationRequest = "openplanet/provideFileDecoration";
+const reloadInfoTomlRequest = "openplanet/reloadInfoToml";
 
 interface FileDecorationPayload {
   badge?: string;
   tooltip?: string;
   color?: string;
   propagate?: boolean;
+}
+
+interface ReloadInfoTomlResult {
+  indexedFiles: number;
 }
 
 connection.onInitialize((params: InitializeParams): InitializeResult => {
@@ -236,7 +242,7 @@ connection.onInitialized(async () => {
   }
   if (hasDidChangeWatchedFilesCapability) {
     void connection.client.register(DidChangeWatchedFilesNotification.type, {
-      watchers: [{ globPattern: "**/*.as" }]
+      watchers: [{ globPattern: "**/*.as" }, { globPattern: "**/info.toml" }]
     });
   }
 
@@ -268,10 +274,11 @@ documents.onDidChangeContent((change) => {
   void scheduleValidation(change.document, validationDebounceMs);
 });
 
-documents.onDidClose((event) => {
+  documents.onDidClose((event) => {
   clearPendingValidation(event.document.uri);
   validationGenerationByUri.delete(event.document.uri);
   analysisCache.delete(event.document.uri);
+  parserDebugLoggedVersionByUri.delete(event.document.uri);
   semanticTokenSnapshots.delete(event.document.uri);
   void refreshWorkspaceAnalysisForUri(event.document.uri, "document-closed");
   publishDiagnostics(event.document.uri, undefined, []);
@@ -336,7 +343,11 @@ connection.onCompletion(
         )
       : undefined;
 
-    const items = collectCompletionItems(completionIndex, activeNamespace);
+    const items = collectCompletionItems(
+      completionIndex,
+      activeNamespace,
+      settings.completion.shortcuts
+    );
     return sliceToMaxItems(items);
   }
 );
@@ -644,7 +655,12 @@ connection.onRequest(
     }
 
     const analysis = getDocumentAnalysis(document);
-    return getInlineValuesForRange(document, analysis, params.range);
+    return getInlineValuesForRange(
+      document,
+      analysis,
+      params.range,
+      settings.inlineValues
+    );
   }
 );
 
@@ -687,6 +703,19 @@ connection.onRequest(
     }
 
     return null;
+  }
+);
+
+connection.onRequest(
+  reloadInfoTomlRequest,
+  async (): Promise<ReloadInfoTomlResult> => {
+    clearImportValidationCache();
+    scheduleWorkspaceAnalysisRebuild("manual-reload-info-toml");
+    await workspaceAnalysisBuildPromise;
+    await validateAllOpenDocuments();
+    return {
+      indexedFiles: workspaceAnalysisCache.size
+    };
   }
 );
 
@@ -1045,6 +1074,8 @@ async function validateTextDocument(
   }
 
   analysis = getDocumentAnalysis(document);
+  maybeLogParserDebugOutput(document, analysis);
+  maybeCrashOnParserError(document, analysis);
   diagnostics.push(...getSyntaxDiagnostics(document, analysis, settings.parser));
 
   if (settings.imports.enable) {
@@ -1278,6 +1309,54 @@ function getAnalysisByUri(uri: string): DocumentAnalysis | undefined {
   return analysisCache.get(uri) ?? workspaceAnalysisCache.get(uri);
 }
 
+function maybeLogParserDebugOutput(
+  document: TextDocument,
+  analysis: DocumentAnalysis
+): void {
+  if (!settings.parser.enableDebugOutput || analysis.grammarErrors.length === 0) {
+    return;
+  }
+
+  const lastLoggedVersion = parserDebugLoggedVersionByUri.get(document.uri);
+  if (lastLoggedVersion === document.version) {
+    return;
+  }
+  parserDebugLoggedVersionByUri.set(document.uri, document.version);
+
+  const [firstError] = analysis.grammarErrors;
+  const location = document.positionAt(firstError.start);
+  const lineText = document
+    .getText({
+      start: { line: location.line, character: 0 },
+      end: { line: location.line + 1, character: 0 }
+    })
+    .trimEnd();
+  const sample = lineText.length > 200 ? `${lineText.slice(0, 200)}...` : lineText;
+  connection.console.warn(
+    `[parser] ${document.uri}:${location.line + 1}:${location.character + 1} ` +
+      `${firstError.message} (errors=${analysis.grammarErrors.length})`
+  );
+  if (sample.length > 0) {
+    connection.console.info(`[parser] line: ${sample}`);
+  }
+}
+
+function maybeCrashOnParserError(
+  document: TextDocument,
+  analysis: DocumentAnalysis
+): void {
+  if (!settings.parser.crashOnParseError || analysis.grammarErrors.length === 0) {
+    return;
+  }
+
+  const [firstError] = analysis.grammarErrors;
+  const position = document.positionAt(firstError.start);
+  throw new Error(
+    `[parser-crash] ${document.uri}:${position.line + 1}:${position.character + 1} ` +
+      `${firstError.message}`
+  );
+}
+
 function scheduleWorkspaceAnalysisRebuild(reason: string): void {
   const logger = connection.console as unknown as Logger;
   const buildGeneration = ++workspaceAnalysisBuildGeneration;
@@ -1328,6 +1407,15 @@ async function applyWorkspaceFileChanges(
     return;
   }
 
+  const hasInfoTomlChange = changes.some((change) => isInfoTomlUri(change.uri));
+  if (hasInfoTomlChange) {
+    clearImportValidationCache();
+    scheduleWorkspaceAnalysisRebuild("watch-info-toml");
+    await workspaceAnalysisBuildPromise;
+    await validateAllOpenDocuments();
+    return;
+  }
+
   const logger = connection.console as unknown as Logger;
   let changed = false;
 
@@ -1357,6 +1445,10 @@ async function applyWorkspaceFileChanges(
 
   rebuildWorkspaceFunctionIndexes();
   await validateAllOpenDocuments();
+}
+
+function isInfoTomlUri(uri: string): boolean {
+  return uri.toLowerCase().endsWith("/info.toml");
 }
 
 async function refreshWorkspaceAnalysisForUri(

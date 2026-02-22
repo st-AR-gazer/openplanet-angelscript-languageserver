@@ -1,9 +1,20 @@
 import type { CompletionItem } from "vscode-languageserver/node";
 
+export interface CompletionShortcutSettings {
+  math: boolean;
+  ui: boolean;
+  mathX: boolean;
+  ux: boolean;
+  mat: boolean;
+  quat: boolean;
+  string: boolean;
+}
+
 export interface CompletionSettings {
   enable: boolean;
   namespaces: string[];
   maxItems: number;
+  shortcuts: CompletionShortcutSettings;
 }
 
 export interface InlayHintSettings {
@@ -15,6 +26,14 @@ export interface InlayHintSettings {
   typeHintsForAutos: boolean;
   parameterHintsIgnoredParameterNames: string[];
   parameterHintsIgnoredFunctionNames: string[];
+}
+
+export interface InlineValueSettings {
+  enable: boolean;
+  showInlineValueForLocalVariables: boolean;
+  showInlineValueForParameters: boolean;
+  showInlineValueForMemberAssignment: boolean;
+  showInlineValueForFunctionThisObject: boolean;
 }
 
 export type SemanticTokenMode = "minimal" | "balanced";
@@ -40,6 +59,8 @@ export interface ImportValidationSettings {
 
 export interface ParserSettings {
   enableUnparsableStatementDiagnostics: boolean;
+  enableDebugOutput?: boolean;
+  crashOnParseError?: boolean;
   maxDiagnostics: number;
 }
 
@@ -78,6 +99,7 @@ export interface OpenplanetLanguageServerSettings {
   diagnostics: DiagnosticSettings;
   completion: CompletionSettings;
   inlayHints: InlayHintSettings;
+  inlineValues: InlineValueSettings;
   semanticTokens: SemanticTokenSettings;
   symbols: SymbolSettings;
 }

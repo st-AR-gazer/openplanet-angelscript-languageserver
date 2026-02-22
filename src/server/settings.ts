@@ -29,6 +29,8 @@ export function createDefaultSettings(): OpenplanetLanguageServerSettings {
     },
     parser: {
       enableUnparsableStatementDiagnostics: true,
+      enableDebugOutput: false,
+      crashOnParseError: false,
       maxDiagnostics: 200
     },
     dependencies: {
@@ -48,7 +50,16 @@ export function createDefaultSettings(): OpenplanetLanguageServerSettings {
     completion: {
       enable: true,
       namespaces: [...defaultCompletionNamespaces],
-      maxItems: 500
+      maxItems: 500,
+      shortcuts: {
+        math: true,
+        ui: true,
+        mathX: true,
+        ux: true,
+        mat: true,
+        quat: true,
+        string: true
+      }
     },
     inlayHints: {
       enable: true,
@@ -68,6 +79,13 @@ export function createDefaultSettings(): OpenplanetLanguageServerSettings {
         "Params"
       ],
       parameterHintsIgnoredFunctionNames: []
+    },
+    inlineValues: {
+      enable: true,
+      showInlineValueForLocalVariables: true,
+      showInlineValueForParameters: true,
+      showInlineValueForMemberAssignment: true,
+      showInlineValueForFunctionThisObject: true
     },
     semanticTokens: {
       enable: true,
@@ -104,12 +122,14 @@ export function normalizeSettings(raw: unknown): OpenplanetLanguageServerSetting
   const defaults = createDefaultSettings();
   const root = toRecord(raw);
   const completionRoot = toRecord(root.completion);
+  const completionShortcutsRoot = toRecord(completionRoot.shortcuts);
   const diagnosticsRoot = toRecord(root.diagnostics);
   const importsRoot = toRecord(root.imports);
   const parserRoot = toRecord(root.parser);
   const dependencyRoot = toRecord(root.dependencies);
   const symbolRoot = toRecord(root.symbols);
   const inlayHintsRoot = toRecord(root.inlayHints);
+  const inlineValuesRoot = toRecord(root.inlineValues);
   const semanticTokenRoot = toRecord(root.semanticTokens);
   const trackmania2020Root = toRecord(symbolRoot.trackmania2020);
   const turboRoot = toRecord(symbolRoot.turbo);
@@ -157,6 +177,16 @@ export function normalizeSettings(raw: unknown): OpenplanetLanguageServerSetting
     defaults.parser.maxDiagnostics,
     0
   );
+
+  const parserEnableDebugOutput =
+    typeof parserRoot.enableDebugOutput === "boolean"
+      ? parserRoot.enableDebugOutput
+      : defaults.parser.enableDebugOutput;
+
+  const parserCrashOnParseError =
+    typeof parserRoot.crashOnParseError === "boolean"
+      ? parserRoot.crashOnParseError
+      : defaults.parser.crashOnParseError;
 
   const enableInfoTomlDependencies =
     typeof dependencyRoot.enableInfoTomlDependencies === "boolean"
@@ -227,6 +257,35 @@ export function normalizeSettings(raw: unknown): OpenplanetLanguageServerSetting
     50
   );
 
+  const completionShortcutMath =
+    typeof completionShortcutsRoot.math === "boolean"
+      ? completionShortcutsRoot.math
+      : defaults.completion.shortcuts.math;
+  const completionShortcutUi =
+    typeof completionShortcutsRoot.ui === "boolean"
+      ? completionShortcutsRoot.ui
+      : defaults.completion.shortcuts.ui;
+  const completionShortcutMathX =
+    typeof completionShortcutsRoot.mathX === "boolean"
+      ? completionShortcutsRoot.mathX
+      : defaults.completion.shortcuts.mathX;
+  const completionShortcutUx =
+    typeof completionShortcutsRoot.ux === "boolean"
+      ? completionShortcutsRoot.ux
+      : defaults.completion.shortcuts.ux;
+  const completionShortcutMat =
+    typeof completionShortcutsRoot.mat === "boolean"
+      ? completionShortcutsRoot.mat
+      : defaults.completion.shortcuts.mat;
+  const completionShortcutQuat =
+    typeof completionShortcutsRoot.quat === "boolean"
+      ? completionShortcutsRoot.quat
+      : defaults.completion.shortcuts.quat;
+  const completionShortcutString =
+    typeof completionShortcutsRoot.string === "boolean"
+      ? completionShortcutsRoot.string
+      : defaults.completion.shortcuts.string;
+
   const inlayHintsEnable =
     typeof inlayHintsRoot.enable === "boolean"
       ? inlayHintsRoot.enable
@@ -266,6 +325,27 @@ export function normalizeSettings(raw: unknown): OpenplanetLanguageServerSetting
     inlayHintsRoot.parameterHintsIgnoredFunctionNames,
     defaults.inlayHints.parameterHintsIgnoredFunctionNames
   );
+
+  const inlineValuesEnable =
+    typeof inlineValuesRoot.enable === "boolean"
+      ? inlineValuesRoot.enable
+      : defaults.inlineValues.enable;
+  const showInlineValueForLocalVariables =
+    typeof inlineValuesRoot.showInlineValueForLocalVariables === "boolean"
+      ? inlineValuesRoot.showInlineValueForLocalVariables
+      : defaults.inlineValues.showInlineValueForLocalVariables;
+  const showInlineValueForParameters =
+    typeof inlineValuesRoot.showInlineValueForParameters === "boolean"
+      ? inlineValuesRoot.showInlineValueForParameters
+      : defaults.inlineValues.showInlineValueForParameters;
+  const showInlineValueForMemberAssignment =
+    typeof inlineValuesRoot.showInlineValueForMemberAssignment === "boolean"
+      ? inlineValuesRoot.showInlineValueForMemberAssignment
+      : defaults.inlineValues.showInlineValueForMemberAssignment;
+  const showInlineValueForFunctionThisObject =
+    typeof inlineValuesRoot.showInlineValueForFunctionThisObject === "boolean"
+      ? inlineValuesRoot.showInlineValueForFunctionThisObject
+      : defaults.inlineValues.showInlineValueForFunctionThisObject;
 
   const semanticTokensEnable =
     typeof semanticTokenRoot.enable === "boolean"
@@ -342,6 +422,8 @@ export function normalizeSettings(raw: unknown): OpenplanetLanguageServerSetting
     },
     parser: {
       enableUnparsableStatementDiagnostics,
+      enableDebugOutput: parserEnableDebugOutput,
+      crashOnParseError: parserCrashOnParseError,
       maxDiagnostics: parserMaxDiagnostics
     },
     dependencies: {
@@ -361,7 +443,16 @@ export function normalizeSettings(raw: unknown): OpenplanetLanguageServerSetting
     completion: {
       enable: completionEnable,
       namespaces: completionNamespaces,
-      maxItems: completionMaxItems
+      maxItems: completionMaxItems,
+      shortcuts: {
+        math: completionShortcutMath,
+        ui: completionShortcutUi,
+        mathX: completionShortcutMathX,
+        ux: completionShortcutUx,
+        mat: completionShortcutMat,
+        quat: completionShortcutQuat,
+        string: completionShortcutString
+      }
     },
     inlayHints: {
       enable: inlayHintsEnable,
@@ -372,6 +463,13 @@ export function normalizeSettings(raw: unknown): OpenplanetLanguageServerSetting
       typeHintsForAutos,
       parameterHintsIgnoredParameterNames,
       parameterHintsIgnoredFunctionNames
+    },
+    inlineValues: {
+      enable: inlineValuesEnable,
+      showInlineValueForLocalVariables,
+      showInlineValueForParameters,
+      showInlineValueForMemberAssignment,
+      showInlineValueForFunctionThisObject
     },
     semanticTokens: {
       enable: semanticTokensEnable,
