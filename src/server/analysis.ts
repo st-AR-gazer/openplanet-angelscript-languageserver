@@ -41,6 +41,7 @@ export interface VariableDeclaration {
 export interface FunctionDeclaration {
   id: string;
   name: string;
+  namespacePath: string;
   returnType: string;
   argsText: string;
   start: number;
@@ -126,6 +127,7 @@ export interface DocumentAnalysis {
   importFunctionDeclarations: ImportFunctionDeclaration[];
   typeDeclarations: TypeDeclaration[];
   identifierDeclarations: IdentifierDeclaration[];
+  globalDeclarations: VariableDeclaration[];
   functions: FunctionDeclaration[];
   declaredCallableNames: Set<string>;
   functionNameDeclarationOffsets: Set<number>;
@@ -161,6 +163,11 @@ interface BlockRange {
   end: number;
 }
 
+interface GrammarFunctionWithNamespace {
+  declaration: GrammarFunctionDeclarationNode;
+  namespacePath: string;
+}
+
 interface CallableDeclaration {
   name: string;
   start: number;
@@ -185,6 +192,11 @@ export function analyzeDocument(document: TextDocument): DocumentAnalysis {
     grammar.program,
     parsedStructure.typeDeclarations,
     document
+  );
+  const globalDeclarations = collectGlobalVariableDeclarationsFromGrammarProgram(
+    grammar.program,
+    document,
+    text
   );
   const identifierDeclarations = collectIdentifierDeclarationsFromGrammarProgram(
     grammar.program,
@@ -220,6 +232,9 @@ export function analyzeDocument(document: TextDocument): DocumentAnalysis {
   for (const typeDeclaration of typeDeclarations) {
     declarationOffsets.add(typeDeclaration.start);
   }
+  for (const globalDeclaration of globalDeclarations) {
+    declarationOffsets.add(globalDeclaration.start);
+  }
   for (const declaration of identifierDeclarations) {
     declarationOffsets.add(declaration.start);
   }
@@ -251,6 +266,7 @@ export function analyzeDocument(document: TextDocument): DocumentAnalysis {
     importFunctionDeclarations,
     typeDeclarations,
     identifierDeclarations,
+    globalDeclarations,
     functions,
     declaredCallableNames,
     functionNameDeclarationOffsets,
@@ -408,8 +424,32 @@ export function getTypeResolutionContextAtPosition(
   const localVariableTypes = new Map<string, string>();
   const localFunctionReturnTypes =
     workspaceFunctionReturnTypes ?? collectFunctionReturnTypes(allAnalyses);
-
   const functionIndex = findFunctionIndexAtOffset(analysis.functions, offset);
+  const activeNamespacePath =
+    functionIndex !== undefined ? analysis.functions[functionIndex]?.namespacePath ?? "" : "";
+
+  // Top-level declarations are visible from any function body and from other
+  // top-level initializers in the same scoped analysis set.
+  for (const candidate of allAnalyses) {
+    if (candidate.uri === analysis.uri) {
+      continue;
+    }
+    for (const declaration of candidate.globalDeclarations) {
+      addGlobalDeclarationTypeAlias(
+        localVariableTypes,
+        declaration,
+        activeNamespacePath
+      );
+    }
+  }
+  for (const declaration of analysis.globalDeclarations) {
+    addGlobalDeclarationTypeAlias(
+      localVariableTypes,
+      declaration,
+      activeNamespacePath
+    );
+  }
+
   if (functionIndex === undefined) {
     return { localVariableTypes, localFunctionReturnTypes };
   }
@@ -432,6 +472,30 @@ export function getTypeResolutionContextAtPosition(
   }
 
   return { localVariableTypes, localFunctionReturnTypes };
+}
+
+function addGlobalDeclarationTypeAlias(
+  localVariableTypes: Map<string, string>,
+  declaration: VariableDeclaration,
+  activeNamespacePath: string
+): void {
+  localVariableTypes.set(declaration.name, declaration.type);
+
+  const namespaceSeparator = declaration.name.lastIndexOf("::");
+  if (namespaceSeparator < 0) {
+    return;
+  }
+  const declarationNamespacePath = declaration.name.slice(0, namespaceSeparator);
+  if (declarationNamespacePath !== activeNamespacePath) {
+    return;
+  }
+
+  const shortName = declaration.name.slice(namespaceSeparator + 2);
+  if (!shortName) {
+    return;
+  }
+
+  localVariableTypes.set(shortName, declaration.type);
 }
 
 export function collectFunctionReturnTypes(
@@ -639,20 +703,20 @@ function findFutureDeclarationInScope(
 function parseFunctions(
   maskedText: string,
   nodes: ParsedFunctionNode[],
-  grammarFunctions: GrammarFunctionDeclarationNode[],
+  grammarFunctions: GrammarFunctionWithNamespace[],
   document: TextDocument
 ): FunctionDeclaration[] {
   const functions: FunctionDeclaration[] = [];
-  const grammarFunctionByBodyRange = new Map<string, GrammarFunctionDeclarationNode>();
+  const grammarFunctionByBodyRange = new Map<string, GrammarFunctionWithNamespace>();
   for (const grammarFunction of grammarFunctions) {
     if (
-      grammarFunction.openBrace === undefined ||
-      grammarFunction.closeBrace === undefined
+      grammarFunction.declaration.openBrace === undefined ||
+      grammarFunction.declaration.closeBrace === undefined
     ) {
       continue;
     }
 
-    const key = `${grammarFunction.openBrace}:${grammarFunction.closeBrace}`;
+    const key = `${grammarFunction.declaration.openBrace}:${grammarFunction.declaration.closeBrace}`;
     if (!grammarFunctionByBodyRange.has(key)) {
       grammarFunctionByBodyRange.set(key, grammarFunction);
     }
@@ -660,9 +724,10 @@ function parseFunctions(
 
   for (const node of nodes) {
     const argsText = maskedText.slice(node.openParen + 1, node.closeParen);
-    const grammarFunction = grammarFunctionByBodyRange.get(
+    const grammarFunctionWithNamespace = grammarFunctionByBodyRange.get(
       `${node.openBrace}:${node.closeBrace}`
     );
+    const grammarFunction = grammarFunctionWithNamespace?.declaration;
     const blockRanges = buildBlockRanges(maskedText, node.openBrace, node.closeBrace);
     const fallbackParameters = parseParameters(
       document,
@@ -697,6 +762,7 @@ function parseFunctions(
     functions.push({
       id: `${document.uri}:${node.nameStart}`,
       name: node.name,
+      namespacePath: grammarFunctionWithNamespace?.namespacePath ?? "",
       returnType: grammarFunction?.returnTypeText || node.returnType,
       argsText: argsText.trim(),
       start: node.nameStart,
@@ -840,24 +906,40 @@ function mergeVariableDeclarations(
 
 function collectGrammarFunctionDeclarations(
   program: GrammarProgramNode
-): GrammarFunctionDeclarationNode[] {
-  const declarations: GrammarFunctionDeclarationNode[] = [];
+): GrammarFunctionWithNamespace[] {
+  const declarations: GrammarFunctionWithNamespace[] = [];
 
-  const visitDeclaration = (declaration: GrammarDeclarationNode): void => {
-    if (declaration.kind === "function") {
-      declarations.push(declaration);
+  const visitDeclaration = (
+    declaration: GrammarDeclarationNode,
+    namespacePath: string
+  ): void => {
+    if (declaration.kind === "namespace") {
+      const childNamespacePath = namespacePath
+        ? `${namespacePath}::${declaration.name}`
+        : declaration.name;
+      for (const child of declaration.body) {
+        visitDeclaration(child, childNamespacePath);
+      }
       return;
     }
 
-    if (declaration.kind === "namespace" || declaration.kind === "type") {
+    if (declaration.kind === "function") {
+      declarations.push({
+        declaration,
+        namespacePath
+      });
+      return;
+    }
+
+    if (declaration.kind === "type") {
       for (const child of declaration.body) {
-        visitDeclaration(child);
+        visitDeclaration(child, namespacePath);
       }
     }
   };
 
   for (const declaration of program.declarations) {
-    visitDeclaration(declaration);
+    visitDeclaration(declaration, "");
   }
 
   return declarations;
@@ -959,6 +1041,228 @@ function collectIdentifierDeclarationsFromGrammarProgram(
   }
 
   return dedupeIdentifierDeclarations(declarations.sort((a, b) => a.start - b.start));
+}
+
+function collectGlobalVariableDeclarationsFromGrammarProgram(
+  program: GrammarProgramNode,
+  document: TextDocument,
+  text: string
+): VariableDeclaration[] {
+  const declarations: VariableDeclaration[] = [];
+  const scopeStart = 0;
+  const scopeEnd = text.length;
+
+  const pushVariableDeclaration = (
+    statement: GrammarStatementNode,
+    namespacePath: string
+  ): void => {
+    const pushResolvedDeclaration = (
+      rawTypeText: string,
+      declaratorName: string,
+      declaratorStart: number,
+      declaratorEnd: number
+    ): void => {
+      const rawType = rawTypeText.trim();
+      const normalizedType = normalizeTypeText(rawType).trim();
+      if (!rawType || !normalizedType) {
+        return;
+      }
+      if (
+        !declaratorName ||
+        declaratorStart < 0 ||
+        declaratorEnd <= declaratorStart
+      ) {
+        return;
+      }
+
+      declarations.push({
+        id: `${document.uri}:${declaratorStart}`,
+        name: namespacePath
+          ? `${namespacePath}::${declaratorName}`
+          : declaratorName,
+        type: rawType,
+        start: declaratorStart,
+        end: declaratorEnd,
+        range: offsetsToRange(document, declaratorStart, declaratorEnd),
+        scopeStart,
+        scopeEnd,
+        isParameter: false
+      });
+    };
+
+    if (statement.kind === "variable-declaration") {
+      for (const declarator of statement.declarators) {
+        pushResolvedDeclaration(
+          statement.typeText,
+          declarator.name,
+          declarator.nameStart,
+          declarator.nameEnd
+        );
+      }
+      return;
+    }
+
+    if (statement.kind !== "statement") {
+      return;
+    }
+
+    const recovered =
+      recoverVariableDeclaratorsFromStatementText(statement, text);
+    for (const declarator of recovered) {
+      pushResolvedDeclaration(
+        declarator.typeText,
+        declarator.name,
+        declarator.start,
+        declarator.end
+      );
+    }
+  };
+
+  const visitDeclaration = (
+    declaration: GrammarDeclarationNode,
+    namespacePath: string,
+    insideType: boolean
+  ): void => {
+    if (declaration.kind === "namespace") {
+      const childNamespace = namespacePath
+        ? `${namespacePath}::${declaration.name}`
+        : declaration.name;
+      for (const child of declaration.body) {
+        visitDeclaration(child, childNamespace, insideType);
+      }
+      return;
+    }
+
+    if (declaration.kind === "type") {
+      for (const child of declaration.body) {
+        visitDeclaration(child, namespacePath, true);
+      }
+      return;
+    }
+
+    if (
+      declaration.kind === "function" ||
+      declaration.kind === "callable-declaration" ||
+      declaration.kind === "using"
+    ) {
+      return;
+    }
+
+    if (insideType) {
+      return;
+    }
+
+    pushVariableDeclaration(declaration, namespacePath);
+  };
+
+  for (const declaration of program.declarations) {
+    visitDeclaration(declaration, "", false);
+  }
+
+  return declarations.sort((a, b) => a.start - b.start);
+}
+
+function recoverVariableDeclaratorsFromStatementText(
+  statement: Extract<GrammarStatementNode, { kind: "statement" }>,
+  text: string
+): Array<{ typeText: string; name: string; start: number; end: number }> {
+  const statementText = text.slice(statement.start, statement.end);
+  if (!statementText) {
+    return [];
+  }
+
+  let cursor = 0;
+  while (cursor < statementText.length) {
+    const remaining = statementText.slice(cursor);
+    const attributeMatch = /^\s*\[[^\]\r\n]*\]\s*/.exec(remaining);
+    if (attributeMatch) {
+      cursor += attributeMatch[0].length;
+      continue;
+    }
+
+    const lineCommentMatch = /^\s*\/\/[^\r\n]*(?:\r?\n|$)/.exec(remaining);
+    if (lineCommentMatch) {
+      cursor += lineCommentMatch[0].length;
+      continue;
+    }
+
+    const blockCommentMatch = /^\s*\/\*[\s\S]*?\*\//.exec(remaining);
+    if (blockCommentMatch) {
+      cursor += blockCommentMatch[0].length;
+      continue;
+    }
+
+    break;
+  }
+
+  const declarationText = statementText.slice(cursor).trim();
+  if (!declarationText) {
+    return [];
+  }
+
+  const withoutSemicolon = declarationText.endsWith(";")
+    ? declarationText.slice(0, -1).trimEnd()
+    : declarationText.trimEnd();
+  if (!withoutSemicolon) {
+    return [];
+  }
+
+  const typeAndDeclarators =
+    /^((?:const\s+)?[A-Za-z_][A-Za-z0-9_:<>@&]*)\s+([\s\S]+)$/.exec(
+      withoutSemicolon
+    );
+  if (!typeAndDeclarators) {
+    return [];
+  }
+
+  const typeText = typeAndDeclarators[1].trim();
+  const declaratorsText = typeAndDeclarators[2];
+  if (!typeText || !declaratorsText) {
+    return [];
+  }
+
+  const declaratorsTextStartInStatement = statementText.indexOf(
+    declaratorsText,
+    cursor
+  );
+  if (declaratorsTextStartInStatement < 0) {
+    return [];
+  }
+
+  const declaratorsStart = statement.start + declaratorsTextStartInStatement;
+  const segments = splitCommaSeparatedWithOffsets(
+    declaratorsText,
+    declaratorsStart
+  );
+  const recovered: Array<{ typeText: string; name: string; start: number; end: number }> = [];
+
+  for (const segment of segments) {
+    const nameMatch = /^\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(segment.text);
+    if (!nameMatch) {
+      continue;
+    }
+
+    const name = nameMatch[1];
+    const nameIndex = segment.text.indexOf(name);
+    if (nameIndex < 0) {
+      continue;
+    }
+
+    const afterName = segment.text.slice(nameIndex + name.length).trimStart();
+    if (afterName.startsWith("(")) {
+      continue;
+    }
+
+    const nameStart = segment.start + nameIndex;
+    recovered.push({
+      typeText,
+      name,
+      start: nameStart,
+      end: nameStart + name.length
+    });
+  }
+
+  return recovered;
 }
 
 function collectEnumLabelDeclarationsFromTypeDeclaration(
@@ -1211,20 +1515,14 @@ function parseLocalDeclarations(
       continue;
     }
 
-    const coreMatch = /([A-Za-z_][A-Za-z0-9_:<>@&]*)\s+([A-Za-z_][A-Za-z0-9_]*)/.exec(
-      fullMatch
-    );
-    if (!coreMatch) {
+    const nameStartInFull = fullMatch.lastIndexOf(declarationName);
+    if (nameStartInFull < 0) {
       continue;
     }
-
-    const coreStartInFull = coreMatch.index;
-    const nameStartInCore = coreMatch[0].lastIndexOf(coreMatch[2]);
-    const absoluteCoreStart = bodyStartOffset + match.index + coreStartInFull;
-    const nameStart = absoluteCoreStart + nameStartInCore;
+    const nameStart = bodyStartOffset + match.index + nameStartInFull;
     const nameEnd = nameStart + declarationName.length;
     const blockScope =
-      findInnermostBlockRange(blockRanges, absoluteCoreStart) ?? {
+      findInnermostBlockRange(blockRanges, nameStart) ?? {
         start: bodyStartOffset,
         end: scopeEnd
       };

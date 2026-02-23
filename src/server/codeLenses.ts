@@ -6,6 +6,28 @@ import type { TextDocument } from "vscode-languageserver-textdocument";
 import type { DocumentAnalysis } from "./analysis";
 import { getReferencesAtPosition } from "./navigation";
 
+const openplanetRuntimeCallbackNames = new Set<string>([
+  "Main",
+  "Update",
+  "Render",
+  "RenderEarly",
+  "RenderLate",
+  "RenderMenu",
+  "RenderMenuMain",
+  "RenderMenuSettings",
+  "RenderInterface",
+  "RenderInterface_Settings",
+  "OnEnabled",
+  "OnDisabled",
+  "OnDestroyed",
+  "OnSettingsChanged",
+  "OnKeyPress",
+  "OnMouseButton",
+  "OnMouseMove",
+  "OnMouseWheel",
+  "OnPluginMessage"
+]);
+
 export function getCodeLensesForDocument(
   document: TextDocument,
   analysis: DocumentAnalysis,
@@ -14,6 +36,10 @@ export function getCodeLensesForDocument(
   const codeLenses: CodeLens[] = [];
 
   for (const declaration of analysis.functions) {
+    if (openplanetRuntimeCallbackNames.has(declaration.name)) {
+      continue;
+    }
+
     const references = getReferencesAtPosition(
       document,
       analysis,

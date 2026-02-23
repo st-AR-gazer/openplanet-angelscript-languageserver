@@ -1,3 +1,4 @@
+import { CompletionItemKind } from "vscode-languageserver/node";
 import type { Hover } from "vscode-languageserver/node";
 import { MarkupKind } from "vscode-languageserver/node";
 import type { TextDocument } from "vscode-languageserver-textdocument";
@@ -105,7 +106,24 @@ export function getHoverAtPosition(
     );
   }
 
+  const namespaceQualifiedHover = buildNamespaceQualifiedHover(
+    document,
+    lineNumber,
+    identifier.startCharacter,
+    identifier.endCharacter,
+    index,
+    occurrence
+  );
+  if (namespaceQualifiedHover) {
+    return namespaceQualifiedHover;
+  }
+
   if (analysisToUse && occurrence && occurrence.qualifier === "none") {
+    const variableHover = buildVariableHover(occurrence, index, typeContext);
+    if (variableHover) {
+      return variableHover;
+    }
+
     const typeHover = buildTypeHover(occurrence.name, occurrence.isCall, index);
     if (typeHover) {
       return typeHover;
@@ -154,6 +172,82 @@ export function getHoverAtPosition(
   );
 }
 
+function buildNamespaceQualifiedHover(
+  document: TextDocument,
+  lineNumber: number,
+  identifierStartCharacter: number,
+  identifierEndCharacter: number,
+  index: CompletionIndex,
+  occurrence?: DocumentAnalysis["occurrences"][number]
+): Hover | null {
+  const lineText = getLineText(document, lineNumber);
+  const qualifiedChain = getQualifiedChainAtPosition(
+    lineText,
+    identifierStartCharacter,
+    identifierEndCharacter
+  );
+  if (!qualifiedChain) {
+    return null;
+  }
+
+  const {
+    segments,
+    qualifiedName,
+    hoveredSegment,
+    hoveredSegmentIndex
+  } = qualifiedChain;
+  const hoveredPath = segments.slice(0, hoveredSegmentIndex + 1).join("::");
+  if (!hoveredPath) {
+    return null;
+  }
+
+  if (occurrence?.isCall && occurrence.name === hoveredSegment) {
+    return null;
+  }
+
+  if (
+    hoveredSegmentIndex === segments.length - 1 &&
+    segments.length >= 2
+  ) {
+    const parentPath = segments.slice(0, -1).join("::");
+    if (isEnumMemberPath(index, parentPath, hoveredSegment)) {
+      const enumDocsUrl = `${openplanetDocsBaseUrl}/${encodeTypePathForDocs(parentPath)}`;
+      const enumValueDocsUrl = `${enumDocsUrl}#:~:text=${encodeURIComponent(
+        qualifiedName
+      )}`;
+
+      return createMarkdownTextHover([
+        `Enum value: \`${qualifiedName}\``,
+        `Openplanet enum docs: [${parentPath}](${enumDocsUrl})`,
+        `Jump to value: [${qualifiedName}](${enumValueDocsUrl})`
+      ]);
+    }
+  }
+
+  const resolvedTypeName = resolveTypeName(hoveredPath, index);
+  if (resolvedTypeName) {
+    return createMarkdownTextHover([
+      `Type: \`${resolvedTypeName}\``,
+      ...buildQualifiedTypeDocumentationLinks(resolvedTypeName, index)
+    ]);
+  }
+
+  if (
+    index.namespaceBuckets.has(hoveredPath) ||
+    index.namespaceChildren.has(hoveredPath)
+  ) {
+    const namespaceDocsUrl = `${openplanetDocsBaseUrl}/${encodeTypePathForDocs(
+      hoveredPath
+    )}`;
+    return createMarkdownTextHover([
+      `Namespace: \`${hoveredPath}\``,
+      `Openplanet namespace docs: [${hoveredPath}](${namespaceDocsUrl})`
+    ]);
+  }
+
+  return null;
+}
+
 function buildTypeHover(
   identifierText: string,
   isCall: boolean,
@@ -171,6 +265,36 @@ function buildTypeHover(
   const links = buildTypeDocumentationLinks(resolvedTypeName, index);
 
   return createMarkdownHover([resolvedTypeName], links.join("\n"));
+}
+
+function buildVariableHover(
+  occurrence: DocumentAnalysis["occurrences"][number],
+  index: CompletionIndex,
+  typeContext?: TypeResolutionContext
+): Hover | null {
+  if (occurrence.isCall || occurrence.qualifier !== "none" || !typeContext) {
+    return null;
+  }
+
+  const rawType = typeContext.localVariableTypes.get(occurrence.name)?.trim();
+  if (!rawType) {
+    return null;
+  }
+
+  const resolvedType = tryResolveTypeFullNameFromTypeString(index, rawType);
+  if (!resolvedType || !resolvedType.includes("::")) {
+    return null;
+  }
+
+  const links = buildQualifiedTypeDocumentationLinks(resolvedType, index);
+  if (links.length === 0) {
+    return null;
+  }
+
+  return createMarkdownHover(
+    [`${rawType} ${occurrence.name}`],
+    links.join("\n")
+  );
 }
 
 function resolveTypeName(
@@ -217,6 +341,25 @@ function buildTypeDocumentationLinks(
   }
 
   return links;
+}
+
+function buildQualifiedTypeDocumentationLinks(
+  resolvedTypeName: string,
+  index: CompletionIndex
+): string[] {
+  if (index.gameTypeFullNames.has(resolvedTypeName)) {
+    return [
+      `Game docs: [${resolvedTypeName}](${nextOpenplanetDocsBaseUrl}/${encodeTypePathForDocs(resolvedTypeName)})`
+    ];
+  }
+
+  if (resolvedTypeName.includes("::")) {
+    return [
+      `Openplanet docs: [${resolvedTypeName}](${openplanetDocsBaseUrl}/${encodeTypePathForDocs(resolvedTypeName)})`
+    ];
+  }
+
+  return buildTypeDocumentationLinks(resolvedTypeName, index);
 }
 
 function shouldAddOpenplanetGlobalTypeDocsLink(
@@ -314,6 +457,7 @@ function buildCallableHover(
 
   const signatures = new Set<string>();
   const documentationBlocks: string[] = [];
+  let qualifiedNameForDocs: string | undefined;
 
   if (qualifier !== "namespace") {
     for (const declaration of collectFunctionDeclarationsByName(
@@ -353,6 +497,7 @@ function buildCallableHover(
       callableName
     );
     if (qualifiedName) {
+      qualifiedNameForDocs = qualifiedName;
       for (const signature of index.coreFunctionSignaturesByQualifiedName.get(
         qualifiedName
       ) ?? []) {
@@ -369,9 +514,21 @@ function buildCallableHover(
     return null;
   }
 
-  const docs = documentationBlocks.length > 0
-    ? documentationBlocks.join("\n\n")
-    : undefined;
+  const docsSections: string[] = [];
+  if (documentationBlocks.length > 0) {
+    docsSections.push(documentationBlocks.join("\n\n"));
+  }
+
+  if (qualifiedNameForDocs) {
+    docsSections.push(
+      `Openplanet docs: [${qualifiedNameForDocs}](${openplanetDocsBaseUrl}/${encodeTypePathForDocs(
+        qualifiedNameForDocs
+      )})`
+    );
+  }
+
+  const docs =
+    docsSections.length > 0 ? docsSections.join("\n\n") : undefined;
   return createMarkdownHover([...signatures], docs);
 }
 
@@ -557,6 +714,79 @@ function getQualifiedCallableNameAtPosition(
   }
 
   return qualifiedName;
+}
+
+function getQualifiedChainAtPosition(
+  lineText: string,
+  identifierStartCharacter: number,
+  identifierEndCharacter: number
+):
+  | {
+      segments: string[];
+      qualifiedName: string;
+      hoveredSegment: string;
+      hoveredSegmentIndex: number;
+    }
+  | undefined {
+  const hoveredSegment = lineText.slice(identifierStartCharacter, identifierEndCharacter);
+  if (!hoveredSegment || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(hoveredSegment)) {
+    return undefined;
+  }
+
+  const prefix = lineText.slice(0, identifierStartCharacter);
+  const suffix = lineText.slice(identifierEndCharacter);
+  const leadingSegments: string[] = [];
+  const trailingSegments: string[] = [];
+
+  let workingPrefix = prefix;
+  while (true) {
+    const match = /([A-Za-z_][A-Za-z0-9_]*)\s*::\s*$/.exec(workingPrefix);
+    if (!match || match.index < 0) {
+      break;
+    }
+    leadingSegments.unshift(match[1]);
+    workingPrefix = workingPrefix.slice(0, match.index);
+  }
+
+  let workingSuffix = suffix;
+  while (true) {
+    const match = /^\s*::\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(workingSuffix);
+    if (!match) {
+      break;
+    }
+    trailingSegments.push(match[1]);
+    workingSuffix = workingSuffix.slice(match[0].length);
+  }
+
+  const segments = [...leadingSegments, hoveredSegment, ...trailingSegments];
+  if (segments.length < 2) {
+    return undefined;
+  }
+
+  return {
+    segments,
+    qualifiedName: segments.join("::"),
+    hoveredSegment,
+    hoveredSegmentIndex: leadingSegments.length
+  };
+}
+
+function isEnumMemberPath(
+  index: CompletionIndex,
+  enumTypePath: string,
+  enumMemberName: string
+): boolean {
+  const bucket = index.namespaceBuckets.get(enumTypePath);
+  if (!bucket) {
+    return false;
+  }
+
+  return bucket.items.some(
+    (item) =>
+      item.label === enumMemberName &&
+      (item.kind === CompletionItemKind.EnumMember ||
+        (typeof item.detail === "string" && item.detail.startsWith("Enum value")))
+  );
 }
 
 function extractReceiverExpression(beforeDot: string): string | undefined {

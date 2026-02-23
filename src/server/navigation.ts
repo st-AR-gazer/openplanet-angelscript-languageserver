@@ -39,7 +39,14 @@ interface FunctionSymbolTarget {
   name: string;
 }
 
-type SymbolTarget = LocalSymbolTarget | FunctionSymbolTarget;
+interface GlobalSymbolTarget {
+  kind: "global";
+  name: string;
+  declarationUri: string;
+  declarationRange: Range;
+}
+
+type SymbolTarget = LocalSymbolTarget | GlobalSymbolTarget | FunctionSymbolTarget;
 
 interface SymbolOccurrenceWithUri {
   uri: string;
@@ -73,6 +80,9 @@ export function getSymbolDefinitionAtPosition(
 
   if (target.kind === "local") {
     return Location.create(target.analysis.uri, target.declarationRange);
+  }
+  if (target.kind === "global") {
+    return Location.create(target.declarationUri, target.declarationRange);
   }
 
   const declarations = collectFunctionDeclarationsByName(
@@ -489,11 +499,11 @@ function resolveSymbolTargetAtOffset(
     return undefined;
   }
 
-  if (occurrence.qualifier !== "none") {
+  if (occurrence.qualifier === "dot") {
     return undefined;
   }
 
-  if (occurrence.functionIndex !== undefined) {
+  if (occurrence.qualifier === "none" && occurrence.functionIndex !== undefined) {
     const declaration = resolveVisibleLocalDeclaration(
       analysis,
       occurrence.functionIndex,
@@ -512,6 +522,26 @@ function resolveSymbolTargetAtOffset(
     }
   }
 
+  if (!occurrence.isCall) {
+    const globalDeclaration = resolveGlobalDeclarationAtOccurrence(
+      analysis,
+      allAnalyses,
+      occurrence
+    );
+    if (globalDeclaration) {
+      return {
+        kind: "global",
+        name: globalDeclaration.declaration.name,
+        declarationUri: globalDeclaration.analysis.uri,
+        declarationRange: globalDeclaration.declaration.range
+      };
+    }
+  }
+
+  if (occurrence.qualifier !== "none") {
+    return undefined;
+  }
+
   if (
     collectFunctionDeclarationsByName(
       allAnalyses,
@@ -526,6 +556,97 @@ function resolveSymbolTargetAtOffset(
   }
 
   return undefined;
+}
+
+function resolveGlobalDeclarationAtOccurrence(
+  analysis: DocumentAnalysis,
+  allAnalyses: DocumentAnalysis[],
+  occurrence: IdentifierOccurrence
+):
+  | {
+      analysis: DocumentAnalysis;
+      declaration: DocumentAnalysis["globalDeclarations"][number];
+    }
+  | undefined {
+  const globalName =
+    occurrence.qualifier === "namespace"
+      ? getQualifiedGlobalNameForOccurrence(analysis, occurrence)
+      : occurrence.qualifier === "none"
+        ? occurrence.name
+        : undefined;
+  if (!globalName) {
+    return undefined;
+  }
+
+  const declarations = collectGlobalDeclarationsByName(allAnalyses, globalName);
+  if (declarations.length === 0) {
+    return undefined;
+  }
+
+  const exact = declarations.find(
+    (entry) =>
+      entry.analysis.uri === analysis.uri &&
+      entry.declaration.start === occurrence.start
+  );
+  if (exact) {
+    return exact;
+  }
+
+  return declarations.find((entry) => entry.analysis.uri === analysis.uri) ?? declarations[0];
+}
+
+function collectGlobalDeclarationsByName(
+  allAnalyses: DocumentAnalysis[],
+  globalName: string
+): Array<{ analysis: DocumentAnalysis; declaration: DocumentAnalysis["globalDeclarations"][number] }> {
+  const declarations: Array<{
+    analysis: DocumentAnalysis;
+    declaration: DocumentAnalysis["globalDeclarations"][number];
+  }> = [];
+
+  for (const analysis of allAnalyses) {
+    for (const declaration of analysis.globalDeclarations) {
+      if (declaration.name !== globalName) {
+        continue;
+      }
+      declarations.push({ analysis, declaration });
+    }
+  }
+
+  declarations.sort((a, b) => {
+    if (a.analysis.uri === b.analysis.uri) {
+      return a.declaration.start - b.declaration.start;
+    }
+    return a.analysis.uri.localeCompare(b.analysis.uri);
+  });
+
+  return declarations;
+}
+
+function getQualifiedGlobalNameForOccurrence(
+  analysis: DocumentAnalysis,
+  occurrence: IdentifierOccurrence
+): string | undefined {
+  if (occurrence.qualifier !== "namespace") {
+    return undefined;
+  }
+
+  const lineText = getAnalysisLineText(analysis, occurrence.range.start.line);
+  if (!lineText) {
+    return undefined;
+  }
+
+  const prefix = lineText.slice(0, occurrence.range.start.character);
+  const match =
+    /([A-Za-z_][A-Za-z0-9_]*(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)*)\s*::\s*$/.exec(
+      prefix
+    );
+  if (!match) {
+    return undefined;
+  }
+
+  const leftPath = match[1].replace(/\s*::\s*/g, "::");
+  return `${leftPath}::${occurrence.name}`;
 }
 
 function collectSymbolOccurrences(
@@ -562,6 +683,70 @@ function collectSymbolOccurrences(
         analysis,
         occurrence
       });
+    }
+
+    return dedupeOccurrences(entries);
+  }
+
+  if (target.kind === "global") {
+    const entries: SymbolOccurrenceWithUri[] = [];
+    const isQualifiedGlobal = target.name.includes("::");
+    const unqualifiedName = target.name.split("::").pop() ?? target.name;
+
+    for (const analysis of allAnalyses) {
+      const globalDeclarationByStart = new Map<number, string>(
+        analysis.globalDeclarations.map((declaration) => [
+          declaration.start,
+          declaration.name
+        ])
+      );
+
+      for (const occurrence of analysis.occurrences) {
+        if (occurrence.name !== unqualifiedName) {
+          continue;
+        }
+
+        if (isQualifiedGlobal) {
+          const qualifiedName =
+            occurrence.qualifier === "namespace"
+              ? getQualifiedGlobalNameForOccurrence(analysis, occurrence)
+              : globalDeclarationByStart.get(occurrence.start);
+          if (qualifiedName !== target.name) {
+            continue;
+          }
+        } else {
+          if (occurrence.qualifier !== "none") {
+            continue;
+          }
+
+          if (occurrence.functionIndex !== undefined) {
+            const localDeclaration = resolveVisibleLocalDeclaration(
+              analysis,
+              occurrence.functionIndex,
+              occurrence.name,
+              occurrence.start
+            );
+            if (localDeclaration) {
+              continue;
+            }
+          }
+
+          if (occurrence.isCall || analysis.functionNameDeclarationOffsets.has(occurrence.start)) {
+            continue;
+          }
+
+          const declaredGlobalName = globalDeclarationByStart.get(occurrence.start);
+          if (occurrence.isDeclaration && declaredGlobalName !== target.name) {
+            continue;
+          }
+        }
+
+        entries.push({
+          uri: analysis.uri,
+          analysis,
+          occurrence
+        });
+      }
     }
 
     return dedupeOccurrences(entries);
@@ -835,6 +1020,14 @@ function normalizeTypeLookupName(typeText: string): string {
 
   normalized = normalized.replace(/[@&]+$/g, "").trim();
   return normalized;
+}
+
+function getAnalysisLineText(
+  analysis: DocumentAnalysis,
+  lineNumber: number
+): string {
+  const lines = analysis.text.replace(/\r/g, "").split("\n");
+  return lines[lineNumber] ?? "";
 }
 
 function dedupeOccurrences(

@@ -735,7 +735,7 @@ export function tokenizeMaskedText(maskedText: string): ParserToken[] {
       continue;
     }
 
-    if ("(){}[],;.=~<>@&:+-*/!?".includes(ch)) {
+    if ("(){}[],;.=~<>@&|^%:+-*/!?".includes(ch)) {
       tokens.push({
         kind: "symbol",
         text: ch,

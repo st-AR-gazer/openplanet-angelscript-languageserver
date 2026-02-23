@@ -1,3 +1,6 @@
+import type { Dirent } from "fs";
+import * as fs from "fs/promises";
+import * as path from "path";
 import {
   CodeAction,
   CodeLens,
@@ -29,6 +32,7 @@ import {
   TextDocuments
 } from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
+import { URI } from "vscode-uri";
 import {
   DocumentAnalysis,
   analyzeDocument,
@@ -151,6 +155,10 @@ let workspaceAnalysisBuildPromise: Promise<void> = Promise.resolve();
 let workspaceAnalysisBuildGeneration = 0;
 let scopedAnalysisGeneration = 0;
 const includeScopeCache = new Map<string, { generation: number; uris: string[] }>();
+const pluginScopeCache = new Map<
+  string,
+  { generation: number; uris: string[] }
+>();
 const semanticTokenSnapshots = new Map<string, SemanticTokenSnapshot>();
 let semanticTokenResultCounter = 0;
 const publishedDiagnosticsByUri = new Map<string, Diagnostic[]>();
@@ -1175,6 +1183,7 @@ function getAllOpenDocumentAnalyses(): DocumentAnalysis[] {
 function rebuildWorkspaceFunctionIndexes(): void {
   scopedAnalysisGeneration += 1;
   includeScopeCache.clear();
+  pluginScopeCache.clear();
 
   const analysesByUri = new Map<string, DocumentAnalysis>();
   for (const [uri, analysis] of workspaceAnalysisCache.entries()) {
@@ -1286,6 +1295,25 @@ async function getScopedAnalysesByUri(
     visited.add(rootUri);
   }
 
+  const workspaceRootPath = getContainingWorkspaceRootPath(rootUri);
+  if (workspaceRootPath) {
+    for (const uri of analysisCache.keys()) {
+      if (isUriUnderWorkspaceRoot(uri, workspaceRootPath)) {
+        visited.add(uri);
+      }
+    }
+    for (const uri of workspaceAnalysisCache.keys()) {
+      if (isUriUnderWorkspaceRoot(uri, workspaceRootPath)) {
+        visited.add(uri);
+      }
+    }
+  }
+
+  const pluginScopedUris = await getPluginScopedUris(rootUri);
+  for (const uri of pluginScopedUris) {
+    visited.add(uri);
+  }
+
   const scopedUris = [...visited].sort((a, b) => a.localeCompare(b));
   includeScopeCache.set(rootUri, {
     generation: scopedAnalysisGeneration,
@@ -1305,8 +1333,213 @@ async function getScopedAnalysesByUri(
   return scopedAnalyses.length > 0 ? scopedAnalyses : [rootAnalysis];
 }
 
+async function getPluginScopedUris(rootUri: string): Promise<string[]> {
+  let rootPath: string;
+  try {
+    rootPath = uriToFsPath(rootUri);
+  } catch {
+    return [];
+  }
+
+  const pluginRootPath = await findNearestPluginRootPath(rootPath);
+  if (!pluginRootPath) {
+    return [];
+  }
+
+  const normalizedPluginRoot = normalizePathForCompare(pluginRootPath);
+  const cached = pluginScopeCache.get(normalizedPluginRoot);
+  if (cached && cached.generation === scopedAnalysisGeneration) {
+    return cached.uris;
+  }
+
+  const srcPath = path.join(pluginRootPath, "src");
+  const scopePath = (await isDirectoryPath(srcPath)) ? srcPath : pluginRootPath;
+  const scopedUris = await collectAngelScriptUrisUnderDirectory(scopePath);
+
+  pluginScopeCache.set(normalizedPluginRoot, {
+    generation: scopedAnalysisGeneration,
+    uris: scopedUris
+  });
+
+  if (scopedUris.length === 0) {
+    return scopedUris;
+  }
+
+  const logger = connection.console as unknown as Logger;
+  let changed = false;
+
+  for (const uri of scopedUris) {
+    if (analysisCache.has(uri) || workspaceAnalysisCache.has(uri)) {
+      continue;
+    }
+
+    const analysis = await loadWorkspaceDocumentAnalysis(uri, logger);
+    if (!analysis) {
+      continue;
+    }
+
+    workspaceAnalysisCache.set(uri, analysis);
+    changed = true;
+  }
+
+  if (changed) {
+    rebuildWorkspaceFunctionIndexes();
+  }
+
+  return scopedUris;
+}
+
+async function findNearestPluginRootPath(
+  fileOrDirectoryPath: string
+): Promise<string | undefined> {
+  let currentPath = fileOrDirectoryPath;
+  if (!(await isDirectoryPath(currentPath))) {
+    currentPath = path.dirname(currentPath);
+  }
+
+  while (true) {
+    const infoTomlPath = path.join(currentPath, "info.toml");
+    if (await isFilePath(infoTomlPath)) {
+      return currentPath;
+    }
+
+    const parentPath = path.dirname(currentPath);
+    if (parentPath === currentPath) {
+      break;
+    }
+    currentPath = parentPath;
+  }
+
+  return undefined;
+}
+
+async function collectAngelScriptUrisUnderDirectory(
+  directoryPath: string
+): Promise<string[]> {
+  const uris: string[] = [];
+  const stack: string[] = [directoryPath];
+
+  while (stack.length > 0) {
+    const currentPath = stack.pop();
+    if (!currentPath) {
+      continue;
+    }
+
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(currentPath, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      const fullPath = path.join(currentPath, entry.name);
+      if (entry.isDirectory()) {
+        const lowerName = entry.name.toLowerCase();
+        if (
+          lowerName === ".git" ||
+          lowerName === "node_modules" ||
+          lowerName === "out" ||
+          lowerName === "dist" ||
+          lowerName === "build"
+        ) {
+          continue;
+        }
+
+        stack.push(fullPath);
+        continue;
+      }
+
+      if (!entry.isFile()) {
+        continue;
+      }
+      if (!entry.name.toLowerCase().endsWith(".as")) {
+        continue;
+      }
+
+      uris.push(URI.file(fullPath).toString());
+    }
+  }
+
+  uris.sort((a, b) => a.localeCompare(b));
+  return uris;
+}
+
+async function isDirectoryPath(value: string): Promise<boolean> {
+  try {
+    const stat = await fs.stat(value);
+    return stat.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+async function isFilePath(value: string): Promise<boolean> {
+  try {
+    const stat = await fs.stat(value);
+    return stat.isFile();
+  } catch {
+    return false;
+  }
+}
+
 function getAnalysisByUri(uri: string): DocumentAnalysis | undefined {
   return analysisCache.get(uri) ?? workspaceAnalysisCache.get(uri);
+}
+
+function getContainingWorkspaceRootPath(uri: string): string | undefined {
+  let uriPath: string;
+  try {
+    uriPath = uriToFsPath(uri);
+  } catch {
+    return undefined;
+  }
+
+  const normalizedUriPath = normalizePathForCompare(uriPath);
+  let bestRoot: string | undefined;
+  let bestLength = -1;
+
+  for (const workspaceRoot of workspaceRoots) {
+    const normalizedRoot = normalizePathForCompare(workspaceRoot);
+    const rootPrefix = normalizedRoot.endsWith("/")
+      ? normalizedRoot
+      : `${normalizedRoot}/`;
+    if (
+      normalizedUriPath === normalizedRoot ||
+      normalizedUriPath.startsWith(rootPrefix)
+    ) {
+      if (normalizedRoot.length > bestLength) {
+        bestRoot = workspaceRoot;
+        bestLength = normalizedRoot.length;
+      }
+    }
+  }
+
+  return bestRoot;
+}
+
+function isUriUnderWorkspaceRoot(uri: string, workspaceRoot: string): boolean {
+  let uriPath: string;
+  try {
+    uriPath = uriToFsPath(uri);
+  } catch {
+    return false;
+  }
+
+  const normalizedUriPath = normalizePathForCompare(uriPath);
+  const normalizedRoot = normalizePathForCompare(workspaceRoot);
+  const rootPrefix = normalizedRoot.endsWith("/")
+    ? normalizedRoot
+    : `${normalizedRoot}/`;
+
+  return (
+    normalizedUriPath === normalizedRoot ||
+    normalizedUriPath.startsWith(rootPrefix)
+  );
+}
+
+function normalizePathForCompare(value: string): string {
+  return value.replace(/\\/g, "/").toLowerCase();
 }
 
 function maybeLogParserDebugOutput(

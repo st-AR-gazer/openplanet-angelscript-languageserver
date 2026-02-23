@@ -95,6 +95,8 @@ const indexedContainerTypeNames = new Set<string>([
   "mwrefbuffer"
 ]);
 
+const mutableIndexedObjectTypeNames = new Set<string>(["json::value"]);
+
 const intrinsicGenericTypeBases = new Set<string>(["array", "dictionary"]);
 
 export function getSyntaxDiagnostics(
@@ -403,7 +405,17 @@ export function getSemanticDiagnostics(
     }
 
     if (isNamespacePrefix(analysis.text, occurrence.end)) {
-      continue;
+      if (
+        occurrence.qualifier === "none" &&
+        isKnownNamespacePath(
+          occurrence.name,
+          effectiveIndex,
+          allAnalyses,
+          knownTypeNames
+        )
+      ) {
+        continue;
+      }
     }
 
     if (isInsideImportParameterDeclaration(analysis, occurrence)) {
@@ -449,6 +461,7 @@ export function getSemanticDiagnostics(
         document,
         occurrence,
         effectiveIndex,
+        allAnalyses,
         lineTextCache,
         knownTypeNames
       )
@@ -721,6 +734,13 @@ function collectKnownIdentifierNames(
       names.add(declaration.name);
     }
   }
+  for (const declaration of analysis.globalDeclarations) {
+    names.add(declaration.name);
+    const shortName = declaration.name.split("::").pop();
+    if (shortName) {
+      names.add(shortName);
+    }
+  }
   for (const declaration of analysis.identifierDeclarations) {
     names.add(declaration.name);
   }
@@ -732,6 +752,13 @@ function collectKnownIdentifierNames(
   for (const otherAnalysis of allAnalyses) {
     for (const declarationName of otherAnalysis.declaredCallableNames) {
       names.add(declarationName);
+    }
+    for (const declaration of otherAnalysis.globalDeclarations) {
+      names.add(declaration.name);
+      const shortName = declaration.name.split("::").pop();
+      if (shortName) {
+        names.add(shortName);
+      }
     }
     for (const declaration of otherAnalysis.identifierDeclarations) {
       names.add(declaration.name);
@@ -2274,9 +2301,18 @@ function isMutableIndexedContainerType(typeText: string | undefined): boolean {
     return false;
   }
 
+  const normalizedType = normalizeTypeText(typeText).toLowerCase();
+  if (mutableIndexedObjectTypeNames.has(normalizedType)) {
+    return true;
+  }
+
   const descriptor = parseTypeDescriptor(typeText);
   if (!descriptor) {
     return false;
+  }
+
+  if (mutableIndexedObjectTypeNames.has(descriptor.base.toLowerCase())) {
+    return true;
   }
   return indexedContainerTypeNames.has(descriptor.shortBase);
 }
@@ -3377,6 +3413,13 @@ function inferExpressionType(
     return expressionType;
   }
 
+  if (/^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+$/.test(text)) {
+    return (
+      context.localVariableTypes.get(text) ??
+      context.localFunctionReturnTypes.get(text)
+    );
+  }
+
   if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(text)) {
     return (
       context.localVariableTypes.get(text) ??
@@ -3390,6 +3433,10 @@ function inferExpressionType(
 function splitByTopLevelBinaryOperator(
   text: string
 ): BinaryOperatorSlice | undefined {
+  if (hasTopLevelConditionalOperator(text)) {
+    return undefined;
+  }
+
   const precedenceGroups = [
     ["||", "&&", " and ", " or ", " xor "],
     ["==", "!=", "<=", ">=", "<", ">", " is ", " !is "],
@@ -3441,6 +3488,91 @@ function splitByTopLevelBinaryOperator(
   }
 
   return undefined;
+}
+
+function hasTopLevelConditionalOperator(text: string): boolean {
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let braceDepth = 0;
+  let angleDepth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escapeNext = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (inSingleQuote || inDoubleQuote) {
+      if (ch === "\\") {
+        escapeNext = true;
+        continue;
+      }
+      if (inSingleQuote && ch === "'") {
+        inSingleQuote = false;
+      } else if (inDoubleQuote && ch === "\"") {
+        inDoubleQuote = false;
+      }
+      continue;
+    }
+
+    if (ch === "'") {
+      inSingleQuote = true;
+      continue;
+    }
+    if (ch === "\"") {
+      inDoubleQuote = true;
+      continue;
+    }
+    if (ch === "(") {
+      parenDepth += 1;
+      continue;
+    }
+    if (ch === ")") {
+      parenDepth = Math.max(0, parenDepth - 1);
+      continue;
+    }
+    if (ch === "[") {
+      bracketDepth += 1;
+      continue;
+    }
+    if (ch === "]") {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+      continue;
+    }
+    if (ch === "{") {
+      braceDepth += 1;
+      continue;
+    }
+    if (ch === "}") {
+      braceDepth = Math.max(0, braceDepth - 1);
+      continue;
+    }
+    if (ch === "<") {
+      angleDepth += 1;
+      continue;
+    }
+    if (ch === ">") {
+      angleDepth = Math.max(0, angleDepth - 1);
+      continue;
+    }
+
+    if (
+      ch === "?" &&
+      parenDepth === 0 &&
+      bracketDepth === 0 &&
+      braceDepth === 0 &&
+      angleDepth === 0
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function findTopLevelBinarySplit(
@@ -3984,7 +4116,7 @@ function parseCallArgumentSegment(
   }
 
   const trimmed = source.slice(trimmedStart, trimmedEnd);
-  const namedMatch = /^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([\s\S]+)$/.exec(trimmed);
+  const namedMatch = /^([A-Za-z_][A-Za-z0-9_]*)\s*:(?!:)\s*([\s\S]+)$/.exec(trimmed);
   if (namedMatch) {
     const valueText = namedMatch[2].trim();
     if (valueText.length > 0) {
@@ -5276,6 +5408,7 @@ function isKnownNamespaceQualifiedIdentifier(
   document: TextDocument,
   occurrence: DocumentAnalysis["occurrences"][number],
   index: CompletionIndex,
+  allAnalyses: DocumentAnalysis[],
   lineTextCache?: Map<number, string>,
   knownTypeNames?: Set<string>
 ): boolean {
@@ -5306,13 +5439,101 @@ function isKnownNamespaceQualifiedIdentifier(
     return true;
   }
 
+  if (isKnownWorkspaceQualifiedIdentifier(qualifiedName, allAnalyses)) {
+    return true;
+  }
+
   const parentNamespace = parts.slice(0, -1).join("::");
-  const bucket = index.namespaceBuckets.get(parentNamespace);
-  if (!bucket) {
+  if (
+    !isKnownNamespacePath(
+      parentNamespace,
+      index,
+      allAnalyses,
+      knownTypeNames
+    )
+  ) {
     return false;
   }
 
-  return bucket.items.some((item) => item.label === symbolName);
+  const bucket = index.namespaceBuckets.get(parentNamespace);
+  if (bucket?.items.some((item) => item.label === symbolName)) {
+    return true;
+  }
+
+  return allAnalyses.some((analysis) =>
+    analysis.globalDeclarations.some((declaration) => {
+      if (!declaration.name.startsWith(`${parentNamespace}::`)) {
+        return false;
+      }
+      return (declaration.name.split("::").pop() ?? "") === symbolName;
+    })
+  );
+}
+
+function isKnownWorkspaceQualifiedIdentifier(
+  qualifiedName: string,
+  allAnalyses: DocumentAnalysis[]
+): boolean {
+  for (const analysis of allAnalyses) {
+    if (analysis.declaredCallableNames.has(qualifiedName)) {
+      return true;
+    }
+    if (analysis.typeDeclarations.some((declaration) => declaration.fullName === qualifiedName)) {
+      return true;
+    }
+    if (analysis.globalDeclarations.some((declaration) => declaration.name === qualifiedName)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isKnownNamespacePath(
+  namespacePath: string,
+  index: CompletionIndex,
+  allAnalyses: DocumentAnalysis[],
+  knownTypeNames?: Set<string>
+): boolean {
+  if (!namespacePath) {
+    return false;
+  }
+
+  if (
+    index.namespaceBuckets.has(namespacePath) ||
+    index.namespaceChildren.has(namespacePath)
+  ) {
+    return true;
+  }
+
+  if (isKnownTypeName(index, namespacePath, knownTypeNames)) {
+    return true;
+  }
+
+  const prefix = `${namespacePath}::`;
+  if (knownTypeNames) {
+    for (const typeName of knownTypeNames) {
+      if (typeName.startsWith(prefix)) {
+        return true;
+      }
+    }
+  }
+
+  for (const analysis of allAnalyses) {
+    if (analysis.typeDeclarations.some((declaration) => declaration.fullName.startsWith(prefix))) {
+      return true;
+    }
+    if (analysis.globalDeclarations.some((declaration) => declaration.name.startsWith(prefix))) {
+      return true;
+    }
+    for (const callableName of analysis.declaredCallableNames) {
+      if (callableName.startsWith(prefix)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 function findNextNonWhitespaceIndex(text: string, index: number): number {

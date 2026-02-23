@@ -1,3 +1,4 @@
+import { CompletionItemKind } from "vscode-languageserver/node";
 import { normalizeTypeText } from "./language";
 import {
   findResolvedMember,
@@ -70,6 +71,7 @@ interface TypeDescriptor {
   base: string;
   shortBase: string;
   genericArgs: TypeDescriptor[];
+  isConst: boolean;
   isHandle: boolean;
   isReference: boolean;
   isNull: boolean;
@@ -411,13 +413,102 @@ export function inferExpressionTypeFromText(
     return undefined;
   }
 
-  const normalized = normalizeBangIsOperator(trimmed);
+  const withoutComments = stripCommentsForExpression(trimmed).trim();
+  if (!withoutComments) {
+    return undefined;
+  }
+
+  const normalized = normalizeBangIsOperator(withoutComments);
   const ast = parseExpressionAst(normalized);
   if (!ast) {
-    return inferSimpleLiteralType(trimmed);
+    return inferSimpleLiteralType(withoutComments);
   }
 
   return inferExpressionTypeFromNode(index, ast, context, 0);
+}
+
+function stripCommentsForExpression(text: string): string {
+  let result = "";
+  let inLineComment = false;
+  let inBlockComment = false;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escapeNext = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    const next = text[i + 1] ?? "";
+
+    if (inLineComment) {
+      if (ch === "\n" || ch === "\r") {
+        inLineComment = false;
+        result += ch;
+      }
+      continue;
+    }
+
+    if (inBlockComment) {
+      if (ch === "*" && next === "/") {
+        inBlockComment = false;
+        i += 1;
+      }
+      continue;
+    }
+
+    if (inSingleQuote) {
+      result += ch;
+      if (escapeNext) {
+        escapeNext = false;
+      } else if (ch === "\\") {
+        escapeNext = true;
+      } else if (ch === "'") {
+        inSingleQuote = false;
+      }
+      continue;
+    }
+
+    if (inDoubleQuote) {
+      result += ch;
+      if (escapeNext) {
+        escapeNext = false;
+      } else if (ch === "\\") {
+        escapeNext = true;
+      } else if (ch === "\"") {
+        inDoubleQuote = false;
+      }
+      continue;
+    }
+
+    if (ch === "/" && next === "/") {
+      inLineComment = true;
+      result += " ";
+      i += 1;
+      continue;
+    }
+
+    if (ch === "/" && next === "*") {
+      inBlockComment = true;
+      result += " ";
+      i += 1;
+      continue;
+    }
+
+    if (ch === "'") {
+      inSingleQuote = true;
+      result += ch;
+      continue;
+    }
+
+    if (ch === "\"") {
+      inDoubleQuote = true;
+      result += ch;
+      continue;
+    }
+
+    result += ch;
+  }
+
+  return result;
 }
 
 export function evaluateAssignmentOperatorCompatibility(
@@ -719,9 +810,25 @@ function inferIdentifierType(
   node: IdentifierExpressionNode,
   context: ExpressionInferenceContext
 ): string | undefined {
+  const enumValueType = resolveQualifiedEnumValueType(index, node.qualifiedName);
+  if (enumValueType) {
+    return enumValueType;
+  }
+
+  const qualifiedLocalType = context.localVariableTypes.get(node.qualifiedName);
+  if (qualifiedLocalType) {
+    return qualifiedLocalType;
+  }
+
   const localType = context.localVariableTypes.get(node.name);
   if (localType) {
     return localType;
+  }
+
+  const qualifiedLocalFunctionType =
+    context.localFunctionReturnTypes.get(node.qualifiedName);
+  if (qualifiedLocalFunctionType) {
+    return qualifiedLocalFunctionType;
   }
 
   const localFunctionType = context.localFunctionReturnTypes.get(node.name);
@@ -737,6 +844,45 @@ function inferIdentifierType(
   const knownType = resolveKnownTypeName(index, node.qualifiedName);
   if (knownType) {
     return knownType;
+  }
+
+  return undefined;
+}
+
+function resolveQualifiedEnumValueType(
+  index: CompletionIndex,
+  qualifiedName: string
+): string | undefined {
+  const splitIndex = qualifiedName.lastIndexOf("::");
+  if (splitIndex <= 0 || splitIndex >= qualifiedName.length - 2) {
+    return undefined;
+  }
+
+  const enumTypeName = qualifiedName.slice(0, splitIndex);
+  const enumMemberName = qualifiedName.slice(splitIndex + 2);
+  if (!enumTypeName || !enumMemberName) {
+    return undefined;
+  }
+
+  if (!isEnumTypeName(index, enumTypeName)) {
+    return undefined;
+  }
+
+  const bucket = index.namespaceBuckets.get(enumTypeName);
+  if (!bucket) {
+    return undefined;
+  }
+
+  for (const item of bucket.items) {
+    if (item.label !== enumMemberName) {
+      continue;
+    }
+    if (
+      item.kind === CompletionItemKind.EnumMember ||
+      (typeof item.detail === "string" && item.detail.startsWith("Enum value"))
+    ) {
+      return enumTypeName;
+    }
   }
 
   return undefined;
@@ -1430,6 +1576,14 @@ function evaluateConversion(
     return { status: "unknown", cost: 0 };
   }
 
+  if (
+    actual.isConst &&
+    !expected.isConst &&
+    (expected.isHandle || actual.isHandle || expected.isReference || actual.isReference)
+  ) {
+    return { status: "incompatible", cost: 0 };
+  }
+
   if (actual.isNull) {
     if (expected.isHandle) {
       return { status: "compatible", cost: 1 };
@@ -1499,6 +1653,13 @@ function evaluateConversion(
       status: "compatible",
       cost: numericConversionCost(expected.normalized, actual.normalized)
     };
+  }
+
+  if (
+    (isIntegerTypeName(expected.normalized) && isEnumTypeDescriptor(index, actual)) ||
+    (isEnumTypeDescriptor(index, expected) && isIntegerTypeName(actual.normalized))
+  ) {
+    return { status: "compatible", cost: 2 };
   }
 
   if (isBoolTypeName(expected.normalized) || isStringTypeName(expected.normalized)) {
@@ -1573,6 +1734,31 @@ function evaluateConversion(
   }
 
   return { status: "unknown", cost: 0 };
+}
+
+function isEnumTypeDescriptor(
+  index: CompletionIndex,
+  descriptor: TypeDescriptor
+): boolean {
+  const fullName = resolveTypeFullName(index, descriptor.normalized);
+  if (!fullName) {
+    return false;
+  }
+
+  return isEnumTypeName(index, fullName);
+}
+
+function isEnumTypeName(index: CompletionIndex, fullName: string): boolean {
+  const bucket = index.namespaceBuckets.get(fullName);
+  if (!bucket) {
+    return false;
+  }
+
+  return bucket.items.some(
+    (item) =>
+      item.kind === CompletionItemKind.EnumMember ||
+      (typeof item.detail === "string" && item.detail.startsWith("Enum value"))
+  );
 }
 
 function tryResolveUserDefinedConversion(
@@ -1778,6 +1964,7 @@ function parseTypeDescriptor(
     return undefined;
   }
 
+  let isConst = /\bconst\b/i.test(typeText);
   let normalized = normalizeTypeText(typeText).trim();
   if (!normalized) {
     return undefined;
@@ -1790,6 +1977,7 @@ function parseTypeDescriptor(
       base: "null",
       shortBase: "null",
       genericArgs: [],
+      isConst: false,
       isHandle: false,
       isReference: false,
       isNull: true,
@@ -1800,9 +1988,18 @@ function parseTypeDescriptor(
   }
 
   normalized = normalized
-    .replace(/\b(?:const|in|out|inout)\b/g, " ")
+    .replace(/\b(?:in|out|inout)\b/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+
+  while (normalized.startsWith("const ")) {
+    isConst = true;
+    normalized = normalized.slice("const ".length).trimStart();
+  }
+  while (normalized.endsWith(" const")) {
+    isConst = true;
+    normalized = normalized.slice(0, -(" const".length)).trimEnd();
+  }
 
   let isHandle = false;
   let isReference = false;
@@ -1857,6 +2054,7 @@ function parseTypeDescriptor(
     base: resolvedBase,
     shortBase,
     genericArgs,
+    isConst,
     isHandle,
     isReference,
     isNull: false,
@@ -1935,6 +2133,9 @@ function descriptorToTypeText(descriptor: TypeDescriptor): string {
       : "";
 
   let result = `${descriptor.base}${genericSuffix}`;
+  if (descriptor.isConst) {
+    result = `const ${result}`;
+  }
   if (descriptor.isHandle) {
     result += "@";
   }

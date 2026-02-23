@@ -4,7 +4,11 @@ import {
   Range
 } from "vscode-languageserver/node";
 import type { TextDocument } from "vscode-languageserver-textdocument";
-import type { DocumentAnalysis, FunctionDeclaration } from "./analysis";
+import type {
+  DocumentAnalysis,
+  FunctionDeclaration,
+  VariableDeclaration
+} from "./analysis";
 import { normalizeTypeText } from "./language";
 import type { CompletionIndex, InlayHintSettings } from "./types";
 
@@ -208,44 +212,58 @@ function collectAutoTypeHints(
   const rangeStartOffset = document.offsetAt(hintRange.start);
   const rangeEndOffset = document.offsetAt(hintRange.end);
 
+  const pushAutoTypeHint = (
+    declaration: VariableDeclaration,
+    visibleDeclarations: VariableDeclaration[]
+  ): void => {
+    if (!isAutoTypeDeclaration(declaration.type)) {
+      return;
+    }
+    if (declaration.end < rangeStartOffset || declaration.end > rangeEndOffset) {
+      return;
+    }
+
+    const initializer = getInitializerForLocalDeclaration(
+      analysis.text,
+      declaration.end
+    );
+    if (!initializer) {
+      return;
+    }
+
+    const inferredType = inferAutoTypeFromInitializer(
+      initializer,
+      visibleDeclarations,
+      declaration.start,
+      completionIndex,
+      workspaceFunctionReturnTypes
+    );
+    if (!inferredType || isAutoTypeDeclaration(inferredType)) {
+      return;
+    }
+
+    hints.push({
+      position: document.positionAt(declaration.end),
+      label: `: ${normalizeTypeText(inferredType) || inferredType}`,
+      kind: InlayHintKind.Type,
+      paddingLeft: true
+    });
+  };
+
   for (const fn of analysis.functions) {
-    const declarations = fn.localDeclarations
+    const visibleDeclarations = [...fn.parameters, ...fn.localDeclarations]
       .slice()
       .sort((a, b) => a.start - b.start);
-    for (const declaration of declarations) {
-      if (!isAutoTypeDeclaration(declaration.type)) {
-        continue;
-      }
-      if (declaration.end < rangeStartOffset || declaration.end > rangeEndOffset) {
-        continue;
-      }
-
-      const initializer = getInitializerForLocalDeclaration(
-        analysis.text,
-        declaration.end
-      );
-      if (!initializer) {
-        continue;
-      }
-
-      const inferredType = inferAutoTypeFromInitializer(
-        initializer,
-        fn,
-        declaration.start,
-        completionIndex,
-        workspaceFunctionReturnTypes
-      );
-      if (!inferredType || isAutoTypeDeclaration(inferredType)) {
-        continue;
-      }
-
-      hints.push({
-        position: document.positionAt(declaration.end),
-        label: `: ${normalizeTypeText(inferredType) || inferredType}`,
-        kind: InlayHintKind.Type,
-        paddingLeft: true
-      });
+    for (const declaration of fn.localDeclarations) {
+      pushAutoTypeHint(declaration, visibleDeclarations);
     }
+  }
+
+  const globalDeclarations = analysis.globalDeclarations
+    .slice()
+    .sort((a, b) => a.start - b.start);
+  for (const declaration of globalDeclarations) {
+    pushAutoTypeHint(declaration, globalDeclarations);
   }
 
   return hints;
@@ -597,7 +615,7 @@ function getInitializerForLocalDeclaration(
 
 function inferAutoTypeFromInitializer(
   initializer: string,
-  fn: FunctionDeclaration,
+  visibleDeclarations: VariableDeclaration[],
   declarationStart: number,
   completionIndex: CompletionIndex,
   workspaceFunctionReturnTypes?: Map<string, string>
@@ -678,11 +696,8 @@ function inferAutoTypeFromInitializer(
   const identifierMatch = /^([A-Za-z_][A-Za-z0-9_]*)$/.exec(text);
   if (identifierMatch) {
     const name = identifierMatch[1];
-    const declarations = [...fn.parameters, ...fn.localDeclarations]
-      .slice()
-      .sort((a, b) => a.start - b.start);
-    for (let i = declarations.length - 1; i >= 0; i -= 1) {
-      const declaration = declarations[i];
+    for (let i = visibleDeclarations.length - 1; i >= 0; i -= 1) {
+      const declaration = visibleDeclarations[i];
       if (declaration.start >= declarationStart) {
         continue;
       }

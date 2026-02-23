@@ -1448,6 +1448,10 @@ class GrammarParser {
         if (invalidTypePrefixKeywords.has(token.text)) {
           return false;
         }
+        if (token.text === "auto") {
+          hasTypeNameToken = true;
+          continue;
+        }
         if (!typeOnlyKeywords.has(token.text)) {
           hasTypeNameToken = true;
         }
@@ -1643,6 +1647,9 @@ class GrammarParser {
       const token = this.tokens[cursor];
       if (!token) {
         break;
+      }
+      if (token.kind === "symbol" && token.text === "=") {
+        return undefined;
       }
       if (token.kind === "symbol" && token.text === "(") {
         openParenIndex = cursor;

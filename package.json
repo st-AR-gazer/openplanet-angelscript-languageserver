@@ -521,7 +521,7 @@
     "test:integration": "npm run compile && node out/test/runIntegrationTests.js",
     "test:interactive": "npm run compile && node out/test/runInteractiveTests.js",
     "release:check-changelog": "node scripts/release/checkChangelog.mjs",
-    "release:package": "npx @vscode/vsce package --no-yarn",
+    "release:package": "node scripts/release/packageVsix.mjs",
     "release:smoke": "node scripts/release/smokeVsix.mjs",
     "release:verify": "npm run release:check-changelog && npm run test && npm run test:conformance && npm run test:integration && npm run release:package && npm run release:smoke",
     "vscode:prepublish": "npm run compile"

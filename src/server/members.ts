@@ -250,6 +250,8 @@ export function registerCoreClassTypeInfo(
   }
 
   const members: TypeMemberInfo[] = [];
+  const accessorPropertyTypes = new Map<string, string>();
+  const explicitPropertyNames = new Set<string>();
 
   for (const propRecord of toObjectArray(classRecord.props)) {
     const propName = readString(propRecord.name);
@@ -263,6 +265,7 @@ export function registerCoreClassTypeInfo(
       kind: "property",
       type: typeDecl ?? "var"
     });
+    explicitPropertyNames.add(propName);
   }
 
   for (const methodRecord of toObjectArray(classRecord.methods)) {
@@ -279,6 +282,38 @@ export function registerCoreClassTypeInfo(
       kind: "method",
       returnType: returnType ?? "void",
       args: argsText
+    });
+
+    const accessorProperty = tryBuildCoreAccessorProperty(methodRecord);
+    if (!accessorProperty) {
+      continue;
+    }
+
+    if (accessorProperty.kind === "getter") {
+      accessorPropertyTypes.set(
+        accessorProperty.propertyName,
+        accessorProperty.type
+      );
+      continue;
+    }
+
+    if (!accessorPropertyTypes.has(accessorProperty.propertyName)) {
+      accessorPropertyTypes.set(
+        accessorProperty.propertyName,
+        accessorProperty.type
+      );
+    }
+  }
+
+  for (const [propertyName, propertyType] of accessorPropertyTypes) {
+    if (explicitPropertyNames.has(propertyName)) {
+      continue;
+    }
+
+    members.push({
+      name: propertyName,
+      kind: "property",
+      type: propertyType
     });
   }
 
@@ -330,6 +365,73 @@ function formatCoreArgs(value: unknown): string {
   }
 
   return parts.join(", ");
+}
+
+function tryBuildCoreAccessorProperty(
+  methodRecord: Record<string, unknown>
+):
+  | {
+      kind: "getter" | "setter";
+      propertyName: string;
+      type: string;
+    }
+  | undefined {
+  const methodName = readString(methodRecord.name);
+  if (!methodName) {
+    return undefined;
+  }
+
+  if (methodName.startsWith("get_")) {
+    const propertyName = methodName.slice(4);
+    if (!isValidIdentifier(propertyName)) {
+      return undefined;
+    }
+
+    const args = toObjectArray(methodRecord.args);
+    if (args.length > 0) {
+      return undefined;
+    }
+
+    const returnType = readString(methodRecord.returntypedecl)?.trim();
+    if (!returnType || returnType === "void") {
+      return undefined;
+    }
+
+    return {
+      kind: "getter",
+      propertyName,
+      type: returnType
+    };
+  }
+
+  if (methodName.startsWith("set_")) {
+    const propertyName = methodName.slice(4);
+    if (!isValidIdentifier(propertyName)) {
+      return undefined;
+    }
+
+    const args = toObjectArray(methodRecord.args);
+    if (args.length !== 1) {
+      return undefined;
+    }
+
+    const setterArgType = readString(args[0]?.typedecl)?.trim();
+    if (!setterArgType) {
+      return undefined;
+    }
+
+    return {
+      kind: "setter",
+      propertyName,
+      type: setterArgType
+    };
+  }
+
+  return undefined;
+}
+
+function isValidIdentifier(value: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value);
 }
 
 function registerTypeShortName(

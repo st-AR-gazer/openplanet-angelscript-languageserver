@@ -1,84 +1,96 @@
-// Openplanet AngelScript Language Server Showcase
-//
-// Open this file in the Extension Development Host and test each section.
-// Expected diagnostics are intentional in this file.
+Meta::Plugin@ pluginMeta = Meta::ExecutingPlugin();
+const string  pluginNameHash = Crypto::MD5(pluginMeta.Name);
+const string  menuIconColor = "\\$" + pluginNameHash.SubStr(0, 3);
+const string  pluginIcon = _Text::GetRandomIcon(pluginNameHash); // Replace with an apropriate specific icon
+const string  menuTitle = menuIconColor + pluginIcon + "\\$z " + pluginMeta.Name;
+const string  g_PluginStorageRoot = IO::FromStorageFolder("");
+const bool    g_IsOpDevCompileCheckInstance = pluginMeta.Name.EndsWith("__opdev")
+    || pluginMeta.ID.EndsWith("__opdev")
+    || g_PluginStorageRoot.Contains("__opdev");
+string g_FilterInput = "";
 
-using namespace UI;
-
-#include "LocalInclude.as" // Should resolve: Go To Definition opens test-files/LocalInclude.as.
-#include "DoesNotExist_ShowMissingInclude.as" // Should show missing-include warning.
-
-// Document Symbols: these functions should appear in Outline.
 void Main() {
-  // Completion (namespace + keywords): type below and trigger completion.
-  UI::AllowDoubleClick::break;
-
-  string string;
-
-  UI::SelectableFlags::AllowDoubleClick;
-
-  // Signature Help (Openplanet core): place cursor inside parentheses.
-  GetApp(
-
-  // Case mismatch diagnostic + quick fix (intentional).
-  GetaPp();
-
-  // Unknown symbol diagnostic + quick fix suggestions (intentional).
-  TotallyMadeUpCall();
-
-  // Scope-aware local rename / references test.
-  int localCounter = 1;
-  localCounter = localCounter + 5;
-
-  mat4 myMatrix; // Hover on mat4 should show type info.
-
-  mat3;
-
-  vec3;
-
-  string out;
-
-
-  // Definition/References/Rename for workspace function.
-  int added = AddTwo(localCounter);
-  int includedResult = IncludedDouble(added);
-  print("includedResult: " + tostring(includedResult));
-
-  // Dot-member completion + hover with local type inference.
-  CGameCtnApp@ app = GetApp();
-  app.Curre // Expect completion to include CurrentPlayground.
-
-  // Chained member type resolution.
-  MwId id = app.CurrentPlayground.Analyzer.Id;
-  id.Na // Expect completion to include Name().
-  id.Val // Expect completion to include Value.
-
-  // Hover on the following member tokens should show signatures/details.
-  app.CurrentPlayground.Analyzer;
-  id.Name();
-
-  // Function-return type inference (workspace function).
-  MwId fromFunc = GetPlaygroundId();
-  fromFunc.Na
+    // Hide dependency-provided UiNav Dev tab in this plugin's settings page.
+    S_ShowUiNavDev = false;
+    while (true) {
+        // Service UiNav dump requests from OpDevCompanion while this plugin is active.
+        UiNav::Dump::TickRequestPump();
+        if (!g_IsOpDevCompileCheckInstance) {
+            ScoresTableFilter::Update();
+        }
+        yield();
+    }
 }
 
-void RenameScopeA() {
-  int foo = 10;
-  foo = foo + 1;
+void RenderInterface() {
+    if (!S_Enabled || (S_HideWithGame && !UI::IsGameUIVisible()) || (S_HideWithOP && !UI::IsOverlayShown())) { return; }
+
+    if (UI::Begin(menuTitle + "###main-" + pluginMeta.ID, S_Enabled, UI::WindowFlags::None)) {
+        RenderWindow();
+    }
+    UI::End();
 }
 
-void RenameScopeB() {
-  int foo = 20;
-  foo = foo + 1;
+void RenderMenu() {
+    if (UI::MenuItem(menuTitle, "", S_Enabled)) {
+        S_Enabled = !S_Enabled;
+    }
 }
 
-int AddTwo(int value) {
-  return value + 2;
+void RenderWindow() {
+    UI::Text("ScoresTable Filter");
+    UI::Separator();
+
+    ScoresTableFilter::S_Enable = UI::Checkbox("Enable filter layer", ScoresTableFilter::S_Enable);
+    ScoresTableFilter::S_FilterLiveRankingPlayers = UI::Checkbox("Filter players in live ranking", ScoresTableFilter::S_FilterLiveRankingPlayers);
+    ScoresTableFilter::S_UseCustomListOverlayWhenFiltering = UI::Checkbox(
+        "Use custom list overlay",
+        ScoresTableFilter::S_UseCustomListOverlayWhenFiltering
+    );
+
+    UI::Separator();
+    UI::Text("Manual Filter Input");
+    UI::TextWrapped("Type here to apply a filter immediately. Keyboard capture still works when the scores table is open.");
+
+    string liveFilter = ScoresTableFilter::GetFilterText();
+    if (g_FilterInput != liveFilter) g_FilterInput = liveFilter;
+    string nextFilter = UI::InputText("Filter text", g_FilterInput);
+    if (nextFilter != g_FilterInput) {
+        g_FilterInput = nextFilter;
+        ScoresTableFilter::SetFilterText(nextFilter);
+    }
+
+    if (UI::Button("Clear filter")) {
+        g_FilterInput = "";
+        ScoresTableFilter::SetFilterText("");
+    }
+
+    UI::SameLine();
+    UI::Text(ScoresTableFilter::IsFilterActive() ? "Filter: active" : "Filter: idle");
+    UI::Text(ScoresTableFilter::IsScoresTableOpen() ? "Scores table: open" : "Scores table: closed");
+
+    UI::Separator();
+    UI::Text("Debug");
+    ScoresTableFilter::S_Debug = UI::Checkbox("Show debug window", ScoresTableFilter::S_Debug);
+    ScoresTableFilter::S_DiagStepLogs = UI::Checkbox("Diag step logs", ScoresTableFilter::S_DiagStepLogs);
 }
 
-// Comment explaining thi sfunction
-// very comment yesyes
-MwId GetPlaygroundId() {
-  CGameCtnApp@ app = GetApp();
-  return app.CurrentPlayground.Analyzer.Id;
+void Render() {
+    if (g_IsOpDevCompileCheckInstance) return;
+    ScoresTableFilter::Render();
+}
+
+UI::InputBlocking OnKeyPress(bool down, VirtualKey key) {
+    if (g_IsOpDevCompileCheckInstance) return UI::InputBlocking::DoNothing;
+    return ScoresTableFilter::OnKeyPress(down, key);
+}
+
+void OnDisabled() {
+    if (g_IsOpDevCompileCheckInstance) return;
+    ScoresTableFilter::ResetAll();
+}
+
+void OnDestroyed() {
+    if (g_IsOpDevCompileCheckInstance) return;
+    ScoresTableFilter::ResetAll();
 }

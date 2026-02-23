@@ -168,6 +168,27 @@ async function loadCoreSymbolsFromJson(
       detail: decl ?? "Openplanet function",
       documentation: readString(entry.desc)
     });
+
+    const accessorProperty = tryBuildNamespaceAccessorProperty(
+      name,
+      namespaceName,
+      decl
+    );
+    if (!accessorProperty) {
+      continue;
+    }
+
+    if (isGlobalNamespace) {
+      index.coreGlobalValueNames.add(accessorProperty.propertyName);
+    }
+
+    const propertyType = accessorProperty.type;
+    addSymbol(index, namespaceName, {
+      label: accessorProperty.propertyName,
+      kind: CompletionItemKind.Field,
+      detail: propertyType ? `${propertyType} property` : "Openplanet property",
+      documentation: readString(entry.desc)
+    });
   }
 
   for (const entry of toObjectArray(root.props)) {
@@ -419,4 +440,232 @@ function isDeclarationModifier(token: string): boolean {
     default:
       return false;
   }
+}
+
+function tryBuildNamespaceAccessorProperty(
+  functionName: string,
+  namespaceName: string | undefined,
+  decl: string | undefined
+): { propertyName: string; type?: string } | undefined {
+  if (functionName.startsWith("get_")) {
+    const propertyName = functionName.slice(4);
+    if (!isValidIdentifier(propertyName)) {
+      return undefined;
+    }
+
+    if (decl) {
+      const parameterList = extractParameterListFromDecl(
+        decl,
+        functionName,
+        namespaceName
+      );
+      if (
+        parameterList !== undefined &&
+        parameterList.length > 0 &&
+        parameterList !== "void"
+      ) {
+        return undefined;
+      }
+    }
+
+    const qualifiedFunctionName =
+      namespaceName && namespaceName.length > 0
+        ? `${namespaceName}::${functionName}`
+        : functionName;
+    const returnType = decl
+      ? parseReturnTypeFromDecl(decl, qualifiedFunctionName) ??
+        parseReturnTypeFromDecl(decl, functionName)
+      : undefined;
+    const normalizedReturnType = normalizeAccessorType(returnType);
+    if (normalizedReturnType === "void") {
+      return undefined;
+    }
+
+    return {
+      propertyName,
+      type: normalizedReturnType
+    };
+  }
+
+  if (functionName.startsWith("set_")) {
+    const propertyName = functionName.slice(4);
+    if (!isValidIdentifier(propertyName)) {
+      return undefined;
+    }
+
+    let inferredType: string | undefined;
+    if (decl) {
+      const parameterList = extractParameterListFromDecl(
+        decl,
+        functionName,
+        namespaceName
+      );
+      if (!parameterList || parameterList === "void") {
+        return undefined;
+      }
+
+      const parameters = splitTopLevelByComma(parameterList);
+      if (parameters.length !== 1) {
+        return undefined;
+      }
+
+      inferredType = normalizeAccessorType(extractParameterType(parameters[0]));
+    }
+
+    return {
+      propertyName,
+      type: inferredType
+    };
+  }
+
+  return undefined;
+}
+
+function extractParameterListFromDecl(
+  decl: string,
+  functionName: string,
+  namespaceName: string | undefined
+): string | undefined {
+  const candidateNames: string[] = [];
+  if (namespaceName && namespaceName.length > 0) {
+    candidateNames.push(`${namespaceName}::${functionName}`);
+  }
+  candidateNames.push(functionName);
+
+  for (const candidateName of candidateNames) {
+    const nameIndex = decl.indexOf(candidateName);
+    if (nameIndex < 0) {
+      continue;
+    }
+
+    const openParenIndex = decl.indexOf("(", nameIndex + candidateName.length);
+    if (openParenIndex < 0) {
+      continue;
+    }
+
+    const closeParenIndex = findMatchingParenIndex(decl, openParenIndex);
+    if (closeParenIndex < 0) {
+      continue;
+    }
+
+    return decl.slice(openParenIndex + 1, closeParenIndex).trim();
+  }
+
+  return undefined;
+}
+
+function findMatchingParenIndex(text: string, openParenIndex: number): number {
+  let depth = 0;
+  for (let i = openParenIndex; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === "(") {
+      depth += 1;
+      continue;
+    }
+
+    if (ch === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        return i;
+      }
+    }
+  }
+
+  return -1;
+}
+
+function splitTopLevelByComma(value: string): string[] {
+  const result: string[] = [];
+  let depthAngle = 0;
+  let depthParen = 0;
+  let depthBracket = 0;
+  let depthBrace = 0;
+  let tokenStart = 0;
+
+  for (let i = 0; i < value.length; i += 1) {
+    const ch = value[i];
+    switch (ch) {
+      case "<":
+        depthAngle += 1;
+        break;
+      case ">":
+        depthAngle = Math.max(0, depthAngle - 1);
+        break;
+      case "(":
+        depthParen += 1;
+        break;
+      case ")":
+        depthParen = Math.max(0, depthParen - 1);
+        break;
+      case "[":
+        depthBracket += 1;
+        break;
+      case "]":
+        depthBracket = Math.max(0, depthBracket - 1);
+        break;
+      case "{":
+        depthBrace += 1;
+        break;
+      case "}":
+        depthBrace = Math.max(0, depthBrace - 1);
+        break;
+      case ",":
+        if (
+          depthAngle === 0 &&
+          depthParen === 0 &&
+          depthBracket === 0 &&
+          depthBrace === 0
+        ) {
+          const token = value.slice(tokenStart, i).trim();
+          if (token.length > 0) {
+            result.push(token);
+          }
+          tokenStart = i + 1;
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  const lastToken = value.slice(tokenStart).trim();
+  if (lastToken.length > 0) {
+    result.push(lastToken);
+  }
+
+  return result;
+}
+
+function extractParameterType(parameterText: string): string | undefined {
+  const equalsIndex = parameterText.indexOf("=");
+  const parameterWithoutDefault =
+    equalsIndex >= 0
+      ? parameterText.slice(0, equalsIndex).trim()
+      : parameterText.trim();
+  if (!parameterWithoutDefault) {
+    return undefined;
+  }
+
+  const withNameMatch = /^(.*\S)\s+[A-Za-z_][A-Za-z0-9_]*$/.exec(
+    parameterWithoutDefault
+  );
+  const typeText = (withNameMatch ? withNameMatch[1] : parameterWithoutDefault).trim();
+  return typeText.length > 0 ? typeText : undefined;
+}
+
+function normalizeAccessorType(typeText: string | undefined): string | undefined {
+  if (!typeText) {
+    return undefined;
+  }
+
+  const normalized = typeText.trim();
+  if (!normalized) {
+    return undefined;
+  }
+
+  return normalized;
+}
+
+function isValidIdentifier(value: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value);
 }

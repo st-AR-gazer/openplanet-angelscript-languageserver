@@ -30,7 +30,11 @@ import { getImportDiagnostics } from "../server/imports";
 import { getInlineValuesForRange } from "../server/inlineValues";
 import { getCodeLensesForDocument } from "../server/codeLenses";
 import { getDocumentColors, getColorPresentations } from "../server/colors";
-import { tryResolveExpressionTypeFullName } from "../server/members";
+import {
+  collectMemberCompletionItems,
+  registerCoreClassTypeInfo,
+  tryResolveExpressionTypeFullName
+} from "../server/members";
 import {
   evaluateAssignmentOperatorCompatibility,
   inferExpressionTypeFromText
@@ -38,6 +42,7 @@ import {
 import {
   getDocumentHighlightsAtPosition,
   getImplementationAtPosition,
+  getReferencesAtPosition,
   getRenameWorkspaceEditAtPosition,
   getSignatureHelpAtPosition,
   getTypeDefinitionAtPosition,
@@ -82,22 +87,38 @@ async function main(): Promise<void> {
   testGrammarCallableNestedTemplateParameterParsing();
   testIncludeDirectiveDoesNotPolluteFunctionReturnType(index);
   testTypeResolution(index);
+  testGlobalDeclarationTypeInference(index);
+  testCoreAccessorPropertiesFromCoreMethods(index);
   testBindingDuplicateDeclarationDiagnostic(index);
   testBindingUseBeforeDeclarationDiagnostic(index);
   testBindingNestedShadowingDoesNotDuplicate(index);
+  testBindingConstDeclarationWithCastInitializerDoesNotDuplicate(index);
   testCaseMismatchDiagnostic(index);
   testUnknownMemberDiagnostic(index);
   testUnknownIdentifierDiagnostic(index);
+  testGlobalAutoDeclarationNotUnknownIdentifier(index);
+  testUnknownNamespaceQualifierPrefixDiagnostic(index);
+  testLogicalOrDoesNotMarkIdentifierAsCallable(index);
+  testCrossFileGlobalIdentifierResolution(index);
+  testCrossFileAttributedGlobalIdentifierResolution(index);
+  testCrossFileAttributedGlobalIdentifierResolutionWithLeadingComments(index);
+  testCrossFileNamespacedGlobalArgumentTypeInference(index);
+  testNamespaceScopedGlobalShortNameArgumentTypeInference(index);
   testUsingKnownNamespaceDoesNotProduceUnknownIdentifier(index);
   testNamespacedExpressionDoesNotProduceUnknownType(index);
   testNamespacedEnumTypeAndValueRecognized(index);
   testUnknownTypeDiagnostic(index);
   testArityMismatchDiagnostic(index);
   testCallArgumentTypeMismatchDiagnostic(index);
+  testCallArgumentConstHandleMismatchDiagnostic(index);
+  testCallArgumentTypeInferenceIgnoresInlineComments(index);
+  testNamespacedEnumFlagValueAcceptedForIntArgument(index);
+  testConditionalInitializerDoesNotEmitBinaryMismatch(index);
   testOverloadResolutionPrefersExactMatch(index);
   testTemplateSignatureInference(index);
   testOperatorExpressionTypingInCall(index);
   testAssignmentTypeMismatchDiagnostic(index);
+  testJsonValueIndexAssignmentIsLValue(index);
   testOperatorTypeMismatchDiagnostic(index);
   testOperatorMethodAssignmentCompatibility(index);
   testImplicitOperatorConversionCompatibility(index);
@@ -113,14 +134,19 @@ async function main(): Promise<void> {
   testFuncdefCallableDeclarationIgnored(index);
   testNamespacedCallablesNotSuggestedAsGlobal(index);
   testScopeAwareRename(index);
+  testGlobalVariableReferences(index);
   testBlockScopedShadowRename(index);
   testHoverLocalVariableAndWorkspaceFunctionDocs(index);
   testHoverOnMemberInReturnExpression(index);
   testHoverTypeDocsLinks(index);
+  testHoverNamespaceEnumAndEnumMemberDocsLinks(index);
+  testHoverQualifiedCallableDocsLink(index);
+  testHoverTypedVariableDocsLink(index);
   testSignatureHelp(index);
   testQualifiedSignatureHelp(index);
   testSignatureHelpSelectsOverload(index);
   testInlayHints(index);
+  testInlayHintsGlobalAutoStartnewType(index);
   testCompletionShortcuts(index);
   testInlineValueCategoryToggles();
   testDocumentHighlights();
@@ -145,6 +171,7 @@ async function main(): Promise<void> {
   await testWorkspaceAnalysisIndexLoadsInfoTomlDependencies();
   await testCompletionIndexGameProfileSelection();
   await testCompletionIndexGameProfilePathOverrides();
+  await testCompletionIndexSynthesizesNamespaceAccessorProperties();
   await testMissingIncludeDiagnosticSeverity();
 
   console.log("All tests passed.");
@@ -182,6 +209,164 @@ function testTypeResolution(index: ReturnType<typeof createCompletionIndex>): vo
     resolvedType,
     "MwId",
     "Expected local variable type resolution across chained members."
+  );
+}
+
+function testGlobalDeclarationTypeInference(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  registerNamespacePath(index, "Meta");
+  registerNamespacePath(index, "Crypto");
+
+  index.typeInfoByFullName.set("Meta::Plugin", {
+    fullName: "Meta::Plugin",
+    shortName: "Plugin",
+    namespace: "Meta",
+    members: [
+      {
+        name: "Name",
+        kind: "property",
+        type: "string"
+      },
+      {
+        name: "ID",
+        kind: "property",
+        type: "string"
+      }
+    ]
+  });
+  const pluginTypeCandidates = index.typeFullNamesByShortName.get("Plugin") ?? [];
+  if (!pluginTypeCandidates.includes("Meta::Plugin")) {
+    pluginTypeCandidates.push("Meta::Plugin");
+    index.typeFullNamesByShortName.set("Plugin", pluginTypeCandidates);
+  }
+
+  index.coreFunctionSignaturesByQualifiedName.set("Crypto::MD5", [
+    "string Crypto::MD5(const string &in str)"
+  ]);
+
+  const source = [
+    "Meta::Plugin@ pluginMeta = Meta::ExecutingPlugin();",
+    "const string pluginNameHash = Crypto::MD5(pluginMeta.Name);",
+    "void Main() {}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///global-type-resolution.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+
+  const analysis = analyzeDocument(document);
+  const diagnostics = getSemanticDiagnostics(
+    document,
+    analysis,
+    [analysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 40
+    }
+  );
+
+  assert.ok(
+    !diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "call-argument-type-mismatch" &&
+        diagnostic.range.start.line === 1
+    ),
+    "Expected global declaration member access to keep argument typing for Crypto::MD5(pluginMeta.Name)."
+  );
+}
+
+function testCoreAccessorPropertiesFromCoreMethods(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  registerNamespacePath(index, "Meta");
+  registerNamespacePath(index, "Crypto");
+
+  registerCoreClassTypeInfo(index, "Meta::PluginAccessor", {
+    methods: [
+      {
+        name: "get_Name",
+        returntypedecl: "string",
+        args: []
+      },
+      {
+        name: "set_Name",
+        returntypedecl: "void",
+        args: [{ typedecl: "string", name: "value" }]
+      }
+    ]
+  });
+
+  index.coreFunctionSignaturesByQualifiedName.set("Crypto::MD5", [
+    "string Crypto::MD5(const string &in str)"
+  ]);
+
+  const source = [
+    "Meta::PluginAccessor@ pluginMeta;",
+    "const string pluginNameHash = Crypto::MD5(pluginMeta.Name);",
+    "void Main() {}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///core-accessor-property-resolution.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+
+  const analysis = analyzeDocument(document);
+  const typeContext = getTypeResolutionContextAtPosition(
+    document,
+    analysis,
+    1,
+    0,
+    [analysis]
+  );
+  const resolvedType = tryResolveExpressionTypeFullName(
+    index,
+    "pluginMeta",
+    typeContext
+  );
+  assert.strictEqual(
+    resolvedType,
+    "Meta::PluginAccessor",
+    "Expected global pluginMeta variable to resolve to Meta::PluginAccessor."
+  );
+  if (!resolvedType) {
+    return;
+  }
+  const memberLabels = collectMemberCompletionItems(
+    index,
+    resolvedType,
+    ""
+  ).map((item) => item.label);
+  assert.ok(
+    memberLabels.includes("Name"),
+    "Expected get_/set_ accessors to surface `Name` in member completion."
+  );
+
+  const diagnostics = getSemanticDiagnostics(
+    document,
+    analysis,
+    [analysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 40
+    }
+  );
+
+  assert.ok(
+    !diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "call-argument-type-mismatch" &&
+        diagnostic.range.start.line === 1
+    ),
+    "Expected get_/set_ accessors from core-class metadata to surface as property members for typing."
   );
 }
 
@@ -424,6 +609,402 @@ function testUnknownIdentifierDiagnostic(
   );
 }
 
+function testGlobalAutoDeclarationNotUnknownIdentifier(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  index.coreGlobalFunctionNames.add("startnew");
+  index.coreFunctionReturnTypes.set("startnew", "awaitable@");
+  index.coreFunctionSignatures.set("startnew", [
+    "awaitable@ startnew(CoroutineFunc@ func)"
+  ]);
+
+  const source = [
+    "void Initialise() {}",
+    "auto logging_initializer = startnew(Initialise);",
+    "void Main() {",
+    "  auto copy = logging_initializer;",
+    "}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///global-auto-declaration.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+  const diagnostics = getSemanticDiagnostics(
+    document,
+    analysis,
+    [analysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 40
+    }
+  );
+
+  assert.ok(
+    analysis.globalDeclarations.some(
+      (declaration) => declaration.name === "logging_initializer"
+    ),
+    "Expected auto global declaration to be collected."
+  );
+  assert.ok(
+    !diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "unknown-identifier" &&
+        diagnostic.message.includes("\"logging_initializer\"")
+    ),
+    "Expected auto global declaration logging_initializer to avoid unknown-identifier diagnostics."
+  );
+}
+
+function testUnknownNamespaceQualifierPrefixDiagnostic(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  const source = [
+    "void Main() {",
+    "  ScoresTableFilter::S_Enable = true;",
+    "}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///unknown-namespace-prefix.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+  const diagnostics = getSemanticDiagnostics(
+    document,
+    analysis,
+    [analysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 40
+    }
+  );
+
+  assert.ok(
+    diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "unknown-identifier" &&
+        diagnostic.message.includes("\"ScoresTableFilter\"")
+    ),
+    "Expected unknown identifier diagnostic for unknown namespace qualifier prefix."
+  );
+}
+
+function testLogicalOrDoesNotMarkIdentifierAsCallable(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  const source = [
+    "bool S_Enabled = true;",
+    "bool S_HideWithGame = false;",
+    "void Main() {",
+    "  if (!S_Enabled || (S_HideWithGame && !UI::IsGameUIVisible())) {",
+    "    return;",
+    "  }",
+    "}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///logical-or-not-call.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+  const diagnostics = getSemanticDiagnostics(
+    document,
+    analysis,
+    [analysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 40
+    }
+  );
+
+  assert.ok(
+    !diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "unknown-symbol" &&
+        diagnostic.message.includes("\"S_Enabled\"")
+    ),
+    "Expected logical-OR usage to keep S_Enabled as identifier (not callable)."
+  );
+}
+
+function testCrossFileGlobalIdentifierResolution(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  const globalsDocument = TextDocument.create(
+    "file:///globals.as",
+    "openplanet-angelscript",
+    1,
+    "bool S_ShowUiNavDev = true;\n"
+  );
+  const mainDocument = TextDocument.create(
+    "file:///main.as",
+    "openplanet-angelscript",
+    1,
+    ["void Main() {", "  S_ShowUiNavDev = false;", "}"].join("\n")
+  );
+
+  const globalsAnalysis = analyzeDocument(globalsDocument);
+  const mainAnalysis = analyzeDocument(mainDocument);
+  const diagnostics = getSemanticDiagnostics(
+    mainDocument,
+    mainAnalysis,
+    [mainAnalysis, globalsAnalysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 20
+    }
+  );
+
+  assert.ok(
+    !diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "unknown-identifier" &&
+        diagnostic.message.includes("S_ShowUiNavDev")
+    ),
+    "Expected globals declared in sibling files to avoid unknown identifier diagnostics."
+  );
+}
+
+function testCrossFileAttributedGlobalIdentifierResolution(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  registerNamespacePath(index, "UI");
+  index.coreFunctionSignaturesByQualifiedName.set("UI::Checkbox", [
+    "bool UI::Checkbox(const string&in label, bool value)"
+  ]);
+
+  const settingsDocument = TextDocument.create(
+    "file:///settings-attributed.as",
+    "openplanet-angelscript",
+    1,
+    [
+      '[Setting hidden name="Enabled"]',
+      "bool S_Enabled = true;",
+      "",
+      '[Setting hidden name="Show UiNav Dev"]',
+      "bool S_ShowUiNavDev = false;"
+    ].join("\n")
+  );
+  const namespacedDocument = TextDocument.create(
+    "file:///scores-table-filter-attributed.as",
+    "openplanet-angelscript",
+    1,
+    [
+      "namespace ScoresTableFilter {",
+      '  [Setting hidden name="Enable filter field"]',
+      "  bool S_Enable = true;",
+      "}"
+    ].join("\n")
+  );
+  const mainDocument = TextDocument.create(
+    "file:///main-attributed.as",
+    "openplanet-angelscript",
+    1,
+    [
+      "void Main() {",
+      "  S_ShowUiNavDev = false;",
+      "  S_Enabled = UI::Checkbox(\"Enabled\", S_Enabled);",
+      "  ScoresTableFilter::S_Enable = UI::Checkbox(\"Enable filter layer\", ScoresTableFilter::S_Enable);",
+      "}"
+    ].join("\n")
+  );
+
+  const settingsAnalysis = analyzeDocument(settingsDocument);
+  const namespacedAnalysis = analyzeDocument(namespacedDocument);
+  const mainAnalysis = analyzeDocument(mainDocument);
+  const diagnostics = getSemanticDiagnostics(
+    mainDocument,
+    mainAnalysis,
+    [mainAnalysis, settingsAnalysis, namespacedAnalysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 50
+    }
+  );
+
+  assert.ok(
+    !diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "unknown-identifier" &&
+        (diagnostic.message.includes("S_Enabled") ||
+          diagnostic.message.includes("S_ShowUiNavDev") ||
+          diagnostic.message.includes("S_Enable"))
+    ),
+    "Expected attributed globals from sibling files to resolve in symbol diagnostics."
+  );
+  assert.ok(
+    !diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "call-argument-type-mismatch" &&
+        (diagnostic.range.start.line === 2 || diagnostic.range.start.line === 3)
+    ),
+    "Expected attributed bool globals to keep call argument typing for UI::Checkbox."
+  );
+}
+
+function testCrossFileAttributedGlobalIdentifierResolutionWithLeadingComments(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  const settingsDocument = TextDocument.create(
+    "file:///settings-attributed-comments.as",
+    "openplanet-angelscript",
+    1,
+    [
+      '  [Setting hidden name="Player name selector (relative to frame-player-N)"]',
+      "  // NOTE: In recent builds, there is often an unnamed wrapper frame between `#playername-name` and",
+      "  // `#cmgame-player-name_frame-align`. The `*` matches that wrapper when present.",
+      '  string S_PlayerNameSelector = "#playername-name/*/#cmgame-player-name_frame-align/#cmgame-player-name_label-name";'
+    ].join("\n")
+  );
+  const mainDocument = TextDocument.create(
+    "file:///main-attributed-comments.as",
+    "openplanet-angelscript",
+    1,
+    ["void Main() {", "  string selector = S_PlayerNameSelector;", "}"].join(
+      "\n"
+    )
+  );
+
+  const settingsAnalysis = analyzeDocument(settingsDocument);
+  const mainAnalysis = analyzeDocument(mainDocument);
+  const diagnostics = getSemanticDiagnostics(
+    mainDocument,
+    mainAnalysis,
+    [mainAnalysis, settingsAnalysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 40
+    }
+  );
+
+  assert.ok(
+    !diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "unknown-identifier" &&
+        diagnostic.message.includes("S_PlayerNameSelector")
+    ),
+    "Expected attributed globals with leading comments and selector-like string literals to resolve across files."
+  );
+}
+
+function testCrossFileNamespacedGlobalArgumentTypeInference(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  registerNamespacePath(index, "UI");
+  index.coreFunctionSignaturesByQualifiedName.set("UI::Checkbox", [
+    "bool UI::Checkbox(const string&in label, bool value)"
+  ]);
+
+  const globalsDocument = TextDocument.create(
+    "file:///scores-table-filter.as",
+    "openplanet-angelscript",
+    1,
+    ["namespace ScoresTableFilter {", "  bool S_Enable = true;", "}"].join("\n")
+  );
+  const mainDocument = TextDocument.create(
+    "file:///scores-main.as",
+    "openplanet-angelscript",
+    1,
+    [
+      "void Main() {",
+      "  ScoresTableFilter::S_Enable = UI::Checkbox(\"Enable filter layer\", ScoresTableFilter::S_Enable);",
+      "}"
+    ].join("\n")
+  );
+
+  const globalsAnalysis = analyzeDocument(globalsDocument);
+  const mainAnalysis = analyzeDocument(mainDocument);
+  const diagnostics = getSemanticDiagnostics(
+    mainDocument,
+    mainAnalysis,
+    [mainAnalysis, globalsAnalysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 40
+    }
+  );
+
+  assert.ok(
+    !diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "call-argument-type-mismatch" &&
+        diagnostic.range.start.line === 1
+    ),
+    "Expected namespace-qualified global bool to satisfy UI::Checkbox second argument typing."
+  );
+}
+
+function testNamespaceScopedGlobalShortNameArgumentTypeInference(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  registerNamespacePath(index, "UI");
+  index.coreFunctionSignaturesByQualifiedName.set("UI::Checkbox", [
+    "bool UI::Checkbox(const string&in label, bool value)"
+  ]);
+
+  const document = TextDocument.create(
+    "file:///namespaced-short-global-checkbox.as",
+    "openplanet-angelscript",
+    1,
+    [
+      "namespace logging {",
+      '  [Setting hidden name="Show Debug logs"] bool DEV_S_sDebug = false;',
+      "  void RT_LOGs() {",
+      '    DEV_S_sDebug = UI::Checkbox("Show Debug logs", DEV_S_sDebug);',
+      "  }",
+      "}"
+    ].join("\n")
+  );
+  const analysis = analyzeDocument(document);
+  const diagnostics = getSemanticDiagnostics(
+    document,
+    analysis,
+    [analysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 40
+    }
+  );
+
+  assert.ok(
+    !diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "unknown-identifier" &&
+        diagnostic.message.includes("DEV_S_sDebug")
+    ),
+    "Expected namespace-scoped globals to resolve by short name inside the same namespace."
+  );
+  assert.ok(
+    !diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "call-argument-type-mismatch" &&
+        diagnostic.range.start.line === 3
+    ),
+    "Expected namespace-scoped short-name bool global to satisfy UI::Checkbox argument typing."
+  );
+}
+
 function testUsingKnownNamespaceDoesNotProduceUnknownIdentifier(
   index: ReturnType<typeof createCompletionIndex>
 ): void {
@@ -661,6 +1242,195 @@ function testCallArgumentTypeMismatchDiagnostic(
   );
 }
 
+function testCallArgumentConstHandleMismatchDiagnostic(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  const source = [
+    "void TakeMutable(Game::CGamePlayground@ value) {}",
+    "",
+    "void Main() {",
+    "  const Game::CGamePlayground@ value = null;",
+    "  TakeMutable(value);",
+    "}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///call-argument-const-handle-mismatch.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+  const diagnostics = getSemanticDiagnostics(
+    document,
+    analysis,
+    [analysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 40
+    }
+  );
+
+  assert.ok(
+    diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "call-argument-type-mismatch" &&
+        diagnostic.range.start.line === 4
+    ),
+    "Expected call-argument-type-mismatch when passing const handle to mutable handle parameter."
+  );
+}
+
+function testCallArgumentTypeInferenceIgnoresInlineComments(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  registerNamespacePath(index, "IO");
+  index.coreFunctionSignaturesByQualifiedName.set("IO::IndexFolder", [
+    "string[]@ IO::IndexFolder(const string&in path, bool recursive)"
+  ]);
+
+  const source = [
+    "void Main() {",
+    '  string absFolder = "";',
+    "  IO::IndexFolder(absFolder, /*recursive=*/false);",
+    "}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///call-argument-comments.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+  const diagnostics = getSemanticDiagnostics(
+    document,
+    analysis,
+    [analysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 30
+    }
+  );
+
+  assert.ok(
+    !diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "call-argument-type-mismatch" &&
+        diagnostic.range.start.line === 2
+    ),
+    "Expected inline comments in call arguments to be ignored for overload typing."
+  );
+}
+
+function testNamespacedEnumFlagValueAcceptedForIntArgument(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  registerNamespacePath(index, "UI");
+  registerNamespacePath(index, "UI::WindowFlags");
+
+  index.typeInfoByFullName.set("UI::WindowFlags", {
+    fullName: "UI::WindowFlags",
+    shortName: "WindowFlags",
+    namespace: "UI",
+    members: []
+  });
+  const windowFlagsCandidates = index.typeFullNamesByShortName.get("WindowFlags") ?? [];
+  if (!windowFlagsCandidates.includes("UI::WindowFlags")) {
+    windowFlagsCandidates.push("UI::WindowFlags");
+    index.typeFullNamesByShortName.set("WindowFlags", windowFlagsCandidates);
+  }
+
+  addSymbol(index, "UI", {
+    label: "WindowFlags",
+    kind: CompletionItemKind.Enum,
+    detail: "Openplanet enum"
+  });
+  addSymbol(index, "UI::WindowFlags", {
+    label: "None",
+    kind: CompletionItemKind.EnumMember,
+    detail: "Enum value (WindowFlags)"
+  });
+  index.coreFunctionSignaturesByQualifiedName.set("UI::Begin", [
+    "bool UI::Begin(const string&in title, bool&out open, int flags = UI::GetDefaultWindowFlags())"
+  ]);
+
+  const source = [
+    "bool S_Enabled = true;",
+    "void Main() {",
+    "  if (UI::Begin(\"demo\", S_Enabled, UI::WindowFlags::None)) {",
+    "  }",
+    "}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///enum-flag-int-argument.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+  const diagnostics = getSemanticDiagnostics(
+    document,
+    analysis,
+    [analysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 40
+    }
+  );
+
+  assert.ok(
+    !diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "call-argument-type-mismatch" &&
+        diagnostic.range.start.line === 2
+    ),
+    "Expected UI::WindowFlags::None to satisfy int flags argument in UI::Begin."
+  );
+}
+
+function testConditionalInitializerDoesNotEmitBinaryMismatch(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  const source = [
+    "void Main() {",
+    "  int line = 1;",
+    '  string lineInfo = line >= 0 ? "ok" : "";',
+    "}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///conditional-initializer-binary-mismatch.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+  const diagnostics = getSemanticDiagnostics(
+    document,
+    analysis,
+    [analysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 40
+    }
+  );
+
+  assert.ok(
+    !diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "operator-type-mismatch" &&
+        diagnostic.range.start.line === 2
+    ),
+    "Expected ternary initializer condition (line >= 0 ? ...) to avoid false operator-type-mismatch diagnostics."
+  );
+}
+
 function testOverloadResolutionPrefersExactMatch(
   index: ReturnType<typeof createCompletionIndex>
 ): void {
@@ -817,6 +1587,59 @@ function testAssignmentTypeMismatchDiagnostic(
   assert.ok(
     mismatch,
     "Expected assignment-type-mismatch diagnostic for int value = \"bad\"."
+  );
+}
+
+function testJsonValueIndexAssignmentIsLValue(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  index.typeInfoByFullName.set("Json::Value", {
+    fullName: "Json::Value",
+    shortName: "Value",
+    namespace: "Json",
+    members: [
+      {
+        name: "opIndex",
+        kind: "method",
+        returnType: "Json::Value",
+        args: "const string &in key"
+      }
+    ]
+  });
+  index.typeFullNamesByShortName.set("Value", ["Json::Value"]);
+
+  const source = [
+    "void Main() {",
+    "  Json::Value j;",
+    '  j[\"name\"] = \"Demo\";',
+    "}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///json-value-index-lvalue.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+  const diagnostics = getSemanticDiagnostics(
+    document,
+    analysis,
+    [analysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 40
+    }
+  );
+
+  assert.ok(
+    !diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "assignment-type-mismatch" &&
+        diagnostic.message.includes("Expression is not an l-value")
+    ),
+    "Expected Json::Value index assignment to be treated as an l-value."
   );
 }
 
@@ -1391,6 +2214,53 @@ function testScopeAwareRename(index: ReturnType<typeof createCompletionIndex>): 
   );
 }
 
+function testGlobalVariableReferences(
+  _index: ReturnType<typeof createCompletionIndex>
+): void {
+  const globalsDocument = TextDocument.create(
+    "file:///global-references-settings.as",
+    "openplanet-angelscript",
+    1,
+    "bool S_Enabled = true;\n"
+  );
+  const mainDocument = TextDocument.create(
+    "file:///global-references-main.as",
+    "openplanet-angelscript",
+    1,
+    ["void Main() {", "  S_Enabled = false;", "  if (S_Enabled) {}", "}"].join(
+      "\n"
+    )
+  );
+
+  const globalsAnalysis = analyzeDocument(globalsDocument);
+  const mainAnalysis = analyzeDocument(mainDocument);
+  const references = getReferencesAtPosition(
+    mainDocument,
+    mainAnalysis,
+    [mainAnalysis, globalsAnalysis],
+    1,
+    4,
+    true
+  );
+
+  assert.strictEqual(
+    references.length,
+    3,
+    "Expected global variable references to include declaration + two usages."
+  );
+  assert.ok(
+    references.some(
+      (location) =>
+        location.uri === globalsDocument.uri && location.range.start.line === 0
+    ),
+    "Expected global variable declaration to be included in show references."
+  );
+  assert.ok(
+    references.filter((location) => location.uri === mainDocument.uri).length === 2,
+    "Expected both reads/writes in the current document to be included for global variable references."
+  );
+}
+
 function testHoverLocalVariableAndWorkspaceFunctionDocs(
   index: ReturnType<typeof createCompletionIndex>
 ): void {
@@ -1654,6 +2524,192 @@ function testHoverTypeDocsLinks(index: ReturnType<typeof createCompletionIndex>)
   );
 }
 
+function testHoverNamespaceEnumAndEnumMemberDocsLinks(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  registerNamespacePath(index, "UI");
+  registerNamespacePath(index, "UI::WindowFlags");
+
+  index.typeInfoByFullName.set("UI::WindowFlags", {
+    fullName: "UI::WindowFlags",
+    shortName: "WindowFlags",
+    namespace: "UI",
+    members: []
+  });
+  const windowFlagsCandidates = index.typeFullNamesByShortName.get("WindowFlags") ?? [];
+  if (!windowFlagsCandidates.includes("UI::WindowFlags")) {
+    windowFlagsCandidates.push("UI::WindowFlags");
+    index.typeFullNamesByShortName.set("WindowFlags", windowFlagsCandidates);
+  }
+
+  addSymbol(index, "UI", {
+    label: "WindowFlags",
+    kind: CompletionItemKind.Enum,
+    detail: "Openplanet enum"
+  });
+  addSymbol(index, "UI::WindowFlags", {
+    label: "None",
+    kind: CompletionItemKind.EnumMember,
+    detail: "Enum value (WindowFlags)"
+  });
+
+  const source = [
+    "void Main() {",
+    "  auto flags = UI::WindowFlags::None;",
+    "}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///hover-namespace-enum-links.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+
+  const uiHover = getHoverAtPosition(
+    document,
+    1,
+    15,
+    index,
+    getTypeResolutionContextAtPosition(document, analysis, 1, 15, [analysis]),
+    analysis,
+    [analysis]
+  );
+  assert.ok(uiHover, "Expected namespace hover for UI in namespace chain.");
+  const uiHoverText = hoverToText(uiHover);
+  assert.ok(
+    uiHoverText.includes("https://openplanet.dev/docs/api/UI"),
+    "Expected namespace hover to include Openplanet namespace docs link."
+  );
+
+  const enumHover = getHoverAtPosition(
+    document,
+    1,
+    20,
+    index,
+    getTypeResolutionContextAtPosition(document, analysis, 1, 20, [analysis]),
+    analysis,
+    [analysis]
+  );
+  assert.ok(enumHover, "Expected enum type hover for UI::WindowFlags.");
+  const enumHoverText = hoverToText(enumHover);
+  assert.ok(
+    enumHoverText.includes("https://openplanet.dev/docs/api/UI/WindowFlags"),
+    "Expected enum type hover to include Openplanet enum docs link."
+  );
+
+  const enumValueHover = getHoverAtPosition(
+    document,
+    1,
+    33,
+    index,
+    getTypeResolutionContextAtPosition(document, analysis, 1, 33, [analysis]),
+    analysis,
+    [analysis]
+  );
+  assert.ok(enumValueHover, "Expected enum member hover for UI::WindowFlags::None.");
+  const enumValueHoverText = hoverToText(enumValueHover);
+  assert.ok(
+    enumValueHoverText.includes("https://openplanet.dev/docs/api/UI/WindowFlags"),
+    "Expected enum member hover to include parent enum docs link."
+  );
+  assert.ok(
+    enumValueHoverText.includes("UI%3A%3AWindowFlags%3A%3ANone"),
+    "Expected enum member hover to include text-fragment jump URL for UI::WindowFlags::None."
+  );
+}
+
+function testHoverQualifiedCallableDocsLink(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  registerNamespacePath(index, "Meta");
+  index.coreFunctionSignaturesByQualifiedName.set("Meta::ExecutingPlugin", [
+    "Meta::Plugin@ Meta::ExecutingPlugin()"
+  ]);
+
+  const source = [
+    "void Main() {",
+    "  Meta::ExecutingPlugin();",
+    "}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///hover-qualified-callable-doc-link.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+
+  const hover = getHoverAtPosition(
+    document,
+    1,
+    12,
+    index,
+    getTypeResolutionContextAtPosition(document, analysis, 1, 12, [analysis]),
+    analysis,
+    [analysis]
+  );
+
+  assert.ok(hover, "Expected hover for qualified callable Meta::ExecutingPlugin().");
+  const hoverText = hoverToText(hover);
+  assert.ok(
+    hoverText.includes("https://openplanet.dev/docs/api/Meta/ExecutingPlugin"),
+    "Expected qualified callable hover to include docs link to the specific Openplanet function page."
+  );
+}
+
+function testHoverTypedVariableDocsLink(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  registerNamespacePath(index, "Meta");
+  index.typeInfoByFullName.set("Meta::Plugin", {
+    fullName: "Meta::Plugin",
+    shortName: "Plugin",
+    namespace: "Meta",
+    members: []
+  });
+  const pluginTypes = index.typeFullNamesByShortName.get("Plugin") ?? [];
+  if (!pluginTypes.includes("Meta::Plugin")) {
+    pluginTypes.push("Meta::Plugin");
+    index.typeFullNamesByShortName.set("Plugin", pluginTypes);
+  }
+
+  const source = [
+    "Meta::Plugin@ pluginMeta;",
+    "void Main() {",
+    "  pluginMeta;",
+    "}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///hover-typed-variable-doc-link.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+
+  const hover = getHoverAtPosition(
+    document,
+    2,
+    4,
+    index,
+    getTypeResolutionContextAtPosition(document, analysis, 2, 4, [analysis]),
+    analysis,
+    [analysis]
+  );
+
+  assert.ok(hover, "Expected hover for typed variable pluginMeta.");
+  const hoverText = hoverToText(hover);
+  assert.ok(
+    hoverText.includes("Meta::Plugin@ pluginMeta"),
+    "Expected typed variable hover to include the variable declaration signature."
+  );
+  assert.ok(
+    hoverText.includes("https://openplanet.dev/docs/api/Meta/Plugin"),
+    "Expected typed variable hover to include Openplanet docs link for its resolved type."
+  );
+}
+
 function testSignatureHelp(index: ReturnType<typeof createCompletionIndex>): void {
   const source = ["void Main() {", "  GetApp(", "}"].join("\n");
   const document = TextDocument.create(
@@ -1754,6 +2810,43 @@ function testInlayHints(index: ReturnType<typeof createCompletionIndex>): void {
   assert.ok(
     hints.some((hint) => String(hint.label).includes("text:")),
     "Expected inlay hints to include parameter name for first UI::Text argument."
+  );
+}
+
+function testInlayHintsGlobalAutoStartnewType(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  index.coreGlobalFunctionNames.add("startnew");
+  index.coreFunctionReturnTypes.set("startnew", "awaitable@");
+  index.coreFunctionSignatures.set("startnew", [
+    "awaitable@ startnew(CoroutineFunc@ func)"
+  ]);
+
+  const source = [
+    "void Initialise() {}",
+    "auto logging_initializer = startnew(Initialise);"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///inlay-global-auto-startnew.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+
+  const hints = getInlayHints(
+    document,
+    analysis,
+    index,
+    {
+      start: { line: 0, character: 0 },
+      end: { line: 2, character: 0 }
+    }
+  );
+
+  assert.ok(
+    hints.some((hint) => String(hint.label).includes(": awaitable@")),
+    "Expected type inlay hint for top-level auto initializer from startnew(...) to resolve as awaitable@."
   );
 }
 
@@ -1916,15 +3009,21 @@ function testCodeLenses(): void {
     "file:///code-lens.as",
     "openplanet-angelscript",
     1,
-    ["void Tick() {}", "void Main() {", "  Tick();", "}"].join("\n")
+    [
+      "void Tick() {}",
+      "void RenderMenu() {}",
+      "void Main() {",
+      "  Tick();",
+      "}"
+    ].join("\n")
   );
   const analysis = analyzeDocument(document);
   const codeLenses = getCodeLensesForDocument(document, analysis, [analysis]);
 
   assert.strictEqual(
     codeLenses.length,
-    2,
-    "Expected one code lens per function declaration."
+    1,
+    "Expected code lenses to skip Openplanet runtime callback functions."
   );
   assert.ok(
     codeLenses.every(
@@ -1935,10 +3034,6 @@ function testCodeLenses(): void {
   assert.ok(
     codeLenses.some((lens) => lens.command?.title === "1 reference"),
     "Expected called functions to count only call-site usages in code lens count."
-  );
-  assert.ok(
-    codeLenses.some((lens) => lens.command?.title === "0 references"),
-    "Expected uncalled functions to report zero usages (declaration excluded)."
   );
 }
 
@@ -2759,6 +3854,50 @@ function testBindingNestedShadowingDoesNotDuplicate(
   );
 }
 
+function testBindingConstDeclarationWithCastInitializerDoesNotDuplicate(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  const source = [
+    "int NthIndexOf(const string &in str, const string &in value, int n) {",
+    "  if (n <= 0) return -1;",
+    "  const int len = int(str.Length);",
+    "  int vlen = int(value.Length);",
+    "  if (vlen <= 0 || vlen > len) return -1;",
+    "  int found = 0;",
+    "  for (int i = 0; i <= len - vlen; ++i) {",
+    "    if (str.SubStr(i, vlen) == value) {",
+    "      found++;",
+    "      if (found == n) return i;",
+    "    }",
+    "  }",
+    "  return -1;",
+    "}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///binding-const-cast-local.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+  const diagnostics = getSemanticDiagnostics(
+    document,
+    analysis,
+    [analysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 20
+    }
+  );
+
+  assert.ok(
+    !diagnostics.some((diagnostic) => diagnostic.code === "binding-duplicate-declaration"),
+    "Expected const local declarations with cast-style initializers to avoid duplicate declaration diagnostics."
+  );
+}
+
 function testSemanticTokenDelta(): void {
   const previous = {
     resultId: "1",
@@ -3212,6 +4351,83 @@ async function testCompletionIndexGameProfilePathOverrides(): Promise<void> {
     assert.ok(
       index.coreGlobalFunctionNames.has("TurboOverrideFunction"),
       "Expected turbo.openplanetCoreJsonPath override to be used for core symbol loading."
+    );
+  } finally {
+    await fs.rm(baseUserFolder, { recursive: true, force: true });
+  }
+}
+
+async function testCompletionIndexSynthesizesNamespaceAccessorProperties(): Promise<void> {
+  const baseUserFolder = await fs.mkdtemp(
+    path.join(os.tmpdir(), "openplanet-ls-symbol-accessor-props-")
+  );
+
+  try {
+    const nextPath = path.join(baseUserFolder, "OpenplanetNext");
+    await fs.mkdir(nextPath, { recursive: true });
+
+    const payload = {
+      functions: [
+        {
+          name: "get_Now",
+          ns: "Time",
+          decl: "uint64 Time::get_Now()",
+          desc: "Gets now"
+        }
+      ],
+      props: [],
+      funcdefs: [],
+      enums: [],
+      classes: []
+    };
+    await fs.writeFile(
+      path.join(nextPath, "OpenplanetCore.json"),
+      `${JSON.stringify(payload, null, 2)}\n`,
+      "utf8"
+    );
+
+    const settings = createDefaultSettings();
+    settings.symbols.baseUserFolderPath = baseUserFolder;
+    settings.symbols.enableGameJson = false;
+    settings.symbols.enableHeader = false;
+    settings.symbols.trackmania2020.enabled = true;
+    settings.symbols.turbo.enabled = false;
+    settings.symbols.openplanet4.enabled = false;
+
+    const index = await buildCompletionIndex(settings, createNoopLogger());
+    const timeBucket = index.namespaceBuckets.get("Time");
+    assert.ok(timeBucket, "Expected Time namespace bucket to be loaded from core symbols.");
+    assert.ok(
+      timeBucket?.items.some((item) => item.label === "Now"),
+      "Expected get_Now accessor to synthesize Time::Now property symbol."
+    );
+
+    const document = TextDocument.create(
+      "file:///time-now-accessor-property.as",
+      "openplanet-angelscript",
+      1,
+      ["void Main() {", "  int64 earliestMs = Time::Now;", "}"].join("\n")
+    );
+    const analysis = analyzeDocument(document);
+    const diagnostics = getSemanticDiagnostics(
+      document,
+      analysis,
+      [analysis],
+      index,
+      {
+        enableUnknownSymbols: true,
+        enableCaseMismatch: true,
+        maxSymbolDiagnostics: 20
+      }
+    );
+
+    assert.ok(
+      !diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "unknown-identifier" &&
+          diagnostic.message.includes("\"Now\"")
+      ),
+      "Expected Time::Now to resolve from get_Now accessor metadata."
     );
   } finally {
     await fs.rm(baseUserFolder, { recursive: true, force: true });
