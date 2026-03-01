@@ -19,6 +19,7 @@ export function collectUnknownTypeDiagnostics(
     if (
       fn.returnType &&
       fn.returnType !== "void" &&
+      fn.returnType !== "~" &&
       !isKnownType(fn.returnType)
     ) {
       diagnostics.push({

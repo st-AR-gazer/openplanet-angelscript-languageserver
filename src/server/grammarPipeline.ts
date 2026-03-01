@@ -337,11 +337,15 @@ class GrammarParser {
       return this.parseUsingDeclaration();
     }
 
-    if (
-      token.kind === "keyword" &&
-      (token.text === "class" || token.text === "interface" || token.text === "enum")
-    ) {
-      return this.parseTypeDeclaration();
+    const typeKeywordIndex = this.findTypeDeclarationKeywordIndex(this.index);
+    if (typeKeywordIndex !== undefined) {
+      const declarationStart = this.tokens[this.index]?.start ?? token.start;
+      this.index = typeKeywordIndex;
+      const declaration = this.parseTypeDeclaration();
+      if (declaration.start > declarationStart) {
+        declaration.start = declarationStart;
+      }
+      return declaration;
     }
 
     if (token.kind === "keyword" && (token.text === "funcdef" || token.text === "import")) {
@@ -361,6 +365,26 @@ class GrammarParser {
     }
 
     return this.parseSimpleStatement(true);
+  }
+
+  private findTypeDeclarationKeywordIndex(startIndex: number): number | undefined {
+    let cursor = startIndex;
+    while (
+      this.tokens[cursor]?.kind === "keyword" &&
+      declarationModifierKeywords.has(this.tokens[cursor].text)
+    ) {
+      cursor += 1;
+    }
+
+    const token = this.tokens[cursor];
+    if (
+      token?.kind === "keyword" &&
+      (token.text === "class" || token.text === "interface" || token.text === "enum")
+    ) {
+      return cursor;
+    }
+
+    return undefined;
   }
 
   private parseUsingDeclaration(): GrammarUsingDeclarationNode {
@@ -822,8 +846,9 @@ class GrammarParser {
         case "for":
         case "while":
         case "switch":
-        case "catch":
           return this.parseControlWithCondition(token.text);
+        case "catch":
+          return this.parseCatchControl();
         case "else":
           return this.parseElseControl();
         case "do":
@@ -876,6 +901,17 @@ class GrammarParser {
       end: body?.end ?? keyword.end,
       body
     };
+  }
+
+  private parseCatchControl(): GrammarControlStatementNode {
+    const keyword = this.current();
+    this.advance();
+
+    if (this.checkSymbol("(")) {
+      this.parseParenthesizedClause('Expected "(" after "catch".');
+    }
+
+    return this.parseControlBody("catch", keyword);
   }
 
   private parseDoWhileControl(): GrammarControlStatementNode {

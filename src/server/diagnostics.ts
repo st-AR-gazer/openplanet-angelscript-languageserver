@@ -21,7 +21,6 @@ import {
   normalizeTypeText
 } from "./language";
 import {
-  findLastDotOutsideParens,
   findResolvedMember,
   getResolvedMembersForType,
   tryResolveExpressionTypeFullName,
@@ -182,6 +181,7 @@ export function getSemanticDiagnostics(
 
   const diagnostics: Diagnostic[] = [];
   const lineTextCache = new Map<number, string>();
+  const typeMemberVariableNamesCache = new Map<string, Set<string>>();
   const binderResult = enableSemanticBinding
     ? runBinderPhase(document, analysis, effectiveIndex)
     : undefined;
@@ -469,7 +469,38 @@ export function getSemanticDiagnostics(
       continue;
     }
 
+    if (
+      isInKnownTypeScopedQualifiedChain(
+        document,
+        occurrence,
+        effectiveIndex,
+        allAnalyses,
+        knownTypeNames,
+        lineTextCache
+      )
+    ) {
+      continue;
+    }
+
     if (knownIdentifiers.has(occurrence.name)) {
+      continue;
+    }
+    if (
+      isKnownImplicitMemberVariableIdentifier(
+        analysis,
+        occurrence.start,
+        occurrence.name,
+        typeMemberVariableNamesCache
+      )
+    ) {
+      continue;
+    }
+    const memberVariableTypes = getMemberVariableTypesForOffset(
+      analysis,
+      occurrence.start,
+      workspaceTypeCatalog
+    );
+    if (memberVariableTypes?.has(occurrence.name)) {
       continue;
     }
 
@@ -536,13 +567,10 @@ function buildUnknownMemberDiagnostic(
     occurrence.range.start.line,
     lineTextCache
   );
-  const linePrefix = lineText.slice(0, occurrence.range.start.character);
-  const dotIndex = findLastDotOutsideParens(linePrefix);
-  if (dotIndex < 0) {
-    return undefined;
-  }
-
-  const receiverText = linePrefix.slice(0, dotIndex).trimEnd();
+  const receiverText = extractReceiverTextForMemberOccurrence(
+    lineText,
+    occurrence.range.start.character
+  );
   if (!receiverText) {
     return undefined;
   }
@@ -585,6 +613,14 @@ function buildUnknownMemberDiagnostic(
       (member) => member.name
     )
   );
+  if (
+    shouldSuppressKnownEngineMemberGap(
+      receiverTypeFullName,
+      occurrence.name
+    )
+  ) {
+    return undefined;
+  }
   if (memberNames.size === 0) {
     return undefined;
   }
@@ -749,6 +785,9 @@ function collectKnownIdentifierNames(
     names.add(typeDeclaration.name);
     names.add(typeDeclaration.fullName);
   }
+  for (const enumLabel of collectEnumLabelNamesFromAnalysis(analysis)) {
+    names.add(enumLabel);
+  }
 
   for (const otherAnalysis of allAnalyses) {
     for (const declarationName of otherAnalysis.declaredCallableNames) {
@@ -768,9 +807,90 @@ function collectKnownIdentifierNames(
       names.add(typeDeclaration.name);
       names.add(typeDeclaration.fullName);
     }
+    for (const enumLabel of collectEnumLabelNamesFromAnalysis(otherAnalysis)) {
+      names.add(enumLabel);
+    }
   }
 
   return names;
+}
+
+function collectEnumLabelNamesFromAnalysis(
+  analysis: DocumentAnalysis
+): Set<string> {
+  const labels = new Set<string>();
+  const sourceText = analysis.maskedText || analysis.text;
+  const enumPattern = /\benum\s+[A-Za-z_][A-Za-z0-9_]*\s*\{/g;
+  let match: RegExpExecArray | null;
+  while ((match = enumPattern.exec(sourceText)) !== null) {
+    const openBraceIndex = sourceText.indexOf("{", match.index);
+    if (openBraceIndex < 0) {
+      continue;
+    }
+    const closeBraceIndex = findMatchingClosingBrace(sourceText, openBraceIndex);
+    if (closeBraceIndex < 0) {
+      continue;
+    }
+
+    const bodyText = sourceText.slice(openBraceIndex + 1, closeBraceIndex);
+    for (const segment of splitTopLevelByComma(bodyText)) {
+      const nameMatch = /^\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(segment);
+      if (nameMatch) {
+        labels.add(nameMatch[1]);
+      }
+    }
+
+    enumPattern.lastIndex = closeBraceIndex + 1;
+  }
+
+  return labels;
+}
+
+function findMatchingClosingBrace(text: string, openBraceIndex: number): number {
+  if (openBraceIndex < 0 || openBraceIndex >= text.length || text[openBraceIndex] !== "{") {
+    return -1;
+  }
+
+  let depth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escapeNext = false;
+
+  for (let i = openBraceIndex; i < text.length; i += 1) {
+    const ch = text[i];
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escapeNext = true;
+      continue;
+    }
+    if (!inDoubleQuote && ch === "'") {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+    if (!inSingleQuote && ch === "\"") {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+    if (inSingleQuote || inDoubleQuote) {
+      continue;
+    }
+
+    if (ch === "{") {
+      depth += 1;
+      continue;
+    }
+    if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return i;
+      }
+    }
+  }
+
+  return -1;
 }
 
 function collectKnownTypeNames(
@@ -1094,6 +1214,12 @@ function collectTypeCompatibilityDiagnostics(
         effectiveWorkspaceTypeCatalog
       )
     );
+    const hasUnknownActualType = actualTypes.some((value) =>
+      isEffectivelyUnknownArgumentType(value)
+    );
+    if (hasUnknownActualType) {
+      continue;
+    }
     const resolution = resolveBestCallableOverload(
       index,
       arityCandidates,
@@ -1810,6 +1936,154 @@ function collectStandaloneExpressionOperatorDiagnostics(
   return diagnostics;
 }
 
+function isKnownImplicitMemberVariableIdentifier(
+  analysis: DocumentAnalysis,
+  offset: number,
+  identifierName: string,
+  cache: Map<string, Set<string>>
+): boolean {
+  if (!identifierName) {
+    return false;
+  }
+
+  const containingType = getContainingTypeDeclarationAtOffset(analysis, offset);
+  if (!containingType || containingType.kind === "enum") {
+    return false;
+  }
+
+  const cacheKey = `${analysis.uri}:${containingType.start}:${containingType.end}`;
+  let memberNames = cache.get(cacheKey);
+  if (!memberNames) {
+    const declarationText = analysis.text.slice(containingType.start, containingType.end);
+    memberNames = collectTypeMemberVariableNamesFromDeclarationText(declarationText);
+    cache.set(cacheKey, memberNames);
+  }
+
+  return memberNames.has(identifierName);
+}
+
+function getContainingTypeDeclarationAtOffset(
+  analysis: DocumentAnalysis,
+  offset: number
+): DocumentAnalysis["typeDeclarations"][number] | undefined {
+  let best: DocumentAnalysis["typeDeclarations"][number] | undefined;
+  for (const declaration of analysis.typeDeclarations) {
+    if (offset < declaration.start || offset > declaration.end) {
+      continue;
+    }
+    if (
+      !best ||
+      declaration.end - declaration.start < best.end - best.start
+    ) {
+      best = declaration;
+    }
+  }
+  return best;
+}
+
+function collectTypeMemberVariableNamesFromDeclarationText(
+  declarationText: string
+): Set<string> {
+  const names = new Set<string>();
+  if (!declarationText) {
+    return names;
+  }
+
+  const bodyStart = declarationText.indexOf("{");
+  const bodyEnd = declarationText.lastIndexOf("}");
+  if (bodyStart < 0 || bodyEnd <= bodyStart) {
+    return names;
+  }
+  const bodyText = declarationText.slice(bodyStart + 1, bodyEnd);
+
+  let statementStart = 0;
+  let braceDepth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escapeNext = false;
+
+  const processStatement = (statementText: string): void => {
+    const withoutComments = statementText
+      .replace(/\/\/[^\r\n]*/g, " ")
+      .replace(/\/\*[\s\S]*?\*\//g, " ")
+      .trim();
+    if (!withoutComments) {
+      return;
+    }
+    if (withoutComments.includes("(")) {
+      return;
+    }
+
+    const noSemicolon = withoutComments.endsWith(";")
+      ? withoutComments.slice(0, -1).trimEnd()
+      : withoutComments;
+    if (!noSemicolon) {
+      return;
+    }
+
+    const match =
+      /^(?:\s*(?:shared|private|protected|const|final|static)\s+)*([A-Za-z_][A-Za-z0-9_:<>@&\[\]]*)\s+(.+)$/.exec(
+        noSemicolon
+      );
+    if (!match) {
+      return;
+    }
+
+    const declaratorsText = match[2];
+    for (const segment of splitTopLevelByComma(declaratorsText)) {
+      const nameMatch = /^\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(segment);
+      if (!nameMatch) {
+        continue;
+      }
+      const name = nameMatch[1];
+      const afterName = segment.slice(nameMatch[0].length).trimStart();
+      if (afterName.startsWith("(")) {
+        continue;
+      }
+      names.add(name);
+    }
+  };
+
+  for (let i = 0; i < bodyText.length; i += 1) {
+    const ch = bodyText[i];
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escapeNext = true;
+      continue;
+    }
+    if (!inDoubleQuote && ch === "'") {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+    if (!inSingleQuote && ch === "\"") {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+    if (inSingleQuote || inDoubleQuote) {
+      continue;
+    }
+
+    if (ch === "{") {
+      braceDepth += 1;
+      continue;
+    }
+    if (ch === "}") {
+      braceDepth = Math.max(0, braceDepth - 1);
+      continue;
+    }
+    if (ch === ";" && braceDepth === 0) {
+      const statement = bodyText.slice(statementStart, i + 1);
+      processStatement(statement);
+      statementStart = i + 1;
+    }
+  }
+
+  return names;
+}
+
 function buildStrictBinaryCompatibilityDiagnostic(
   document: TextDocument,
   analysis: DocumentAnalysis,
@@ -2043,6 +2317,9 @@ function buildUnresolvedExpressionDiagnostic(
   if (!objectType || !indexType) {
     return undefined;
   }
+  if (supportsIndexAccess(index, objectType, indexType)) {
+    return undefined;
+  }
 
   return {
     severity: DiagnosticSeverity.Error,
@@ -2055,6 +2332,49 @@ function buildUnresolvedExpressionDiagnostic(
     source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
     code: operatorTypeMismatchCode
   };
+}
+
+function supportsIndexAccess(
+  index: CompletionIndex,
+  objectTypeText: string,
+  indexTypeText: string
+): boolean {
+  const objectDescriptor = parseTypeDescriptor(objectTypeText);
+  const indexDescriptor = parseTypeDescriptor(indexTypeText);
+  if (!objectDescriptor || !indexDescriptor) {
+    return false;
+  }
+
+  if (objectDescriptor.isAny || indexDescriptor.isAny) {
+    return true;
+  }
+
+  const normalizedObject = objectDescriptor.normalized.toLowerCase();
+  if (normalizedObject.includes("json::value")) {
+    return true;
+  }
+
+  const normalizedObjectNoQualifiers = normalizedObject
+    .replace(/\b(?:const|in|out|inout)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/[@&]+$/g, "")
+    .trim();
+  if (/\[\s*\]$/.test(normalizedObjectNoQualifiers)) {
+    return isNumericTypeName(indexDescriptor.base);
+  }
+
+  if (indexedContainerTypeNames.has(objectDescriptor.shortBase)) {
+    return isNumericTypeName(indexDescriptor.base);
+  }
+
+  if (intrinsicGenericTypeBases.has(objectDescriptor.shortBase)) {
+    if (objectDescriptor.shortBase === "dictionary") {
+      return isTextStringTypeName(indexDescriptor.base) || isTextStringTypeName(indexTypeText);
+    }
+    return isNumericTypeName(indexDescriptor.base);
+  }
+
+  return hasLikelyIndexer(index, objectTypeText);
 }
 
 function splitTopLevelIndexAccessExpression(
@@ -2339,6 +2659,40 @@ function hasLikelyWritableIndexer(
   typeText: string | undefined
 ): boolean {
   if (!typeText || /\bconst\b/i.test(typeText)) {
+    return false;
+  }
+
+  const descriptor = parseTypeDescriptor(typeText);
+  const candidates = [
+    descriptor?.normalized,
+    descriptor?.base,
+    normalizeTypeText(typeText).trim()
+  ].filter((value): value is string => !!value && value.length > 0);
+
+  for (const candidate of candidates) {
+    const fullName = tryResolveTypeFullNameFromTypeString(index, candidate);
+    if (!fullName) {
+      continue;
+    }
+
+    const members = getResolvedMembersForType(index, fullName);
+    if (
+      members.some(
+        (member) => member.kind === "method" && member.name === "opIndex"
+      )
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function hasLikelyIndexer(
+  index: CompletionIndex,
+  typeText: string | undefined
+): boolean {
+  if (!typeText) {
     return false;
   }
 
@@ -2796,6 +3150,12 @@ function buildMemberCallCompatibilityDiagnostic(
     receiverTypeFullName,
     occurrence.name
   );
+  if (
+    isDictionaryLikeType(receiverTypeFullName) &&
+    (occurrence.name === "Get" || occurrence.name === "Set")
+  ) {
+    return undefined;
+  }
   if (methodSignatures.length === 0) {
     return undefined;
   }
@@ -2837,6 +3197,12 @@ function buildMemberCallCompatibilityDiagnostic(
       workspaceTypeCatalog
     )
   );
+  const hasUnknownActualType = actualTypes.some((value) =>
+    isEffectivelyUnknownArgumentType(value)
+  );
+  if (hasUnknownActualType) {
+    return undefined;
+  }
   const resolution = resolveBestCallableOverload(index, arityCandidates, actualTypes);
   if (
     resolution.matched &&
@@ -2890,13 +3256,10 @@ function resolveMemberReceiverTypeAtOccurrence(
   lineTextCache: Map<number, string>
 ): string | undefined {
   const lineText = getLineText(document, occurrence.range.start.line, lineTextCache);
-  const linePrefix = lineText.slice(0, occurrence.range.start.character);
-  const dotIndex = findLastDotOutsideParens(linePrefix);
-  if (dotIndex < 0) {
-    return undefined;
-  }
-
-  const receiverText = linePrefix.slice(0, dotIndex).trimEnd();
+  const receiverText = extractReceiverTextForMemberOccurrence(
+    lineText,
+    occurrence.range.start.character
+  );
   if (!receiverText) {
     return undefined;
   }
@@ -2911,6 +3274,142 @@ function resolveMemberReceiverTypeAtOccurrence(
     index
   );
   return tryResolveExpressionTypeFullName(index, receiverText, typeContext);
+}
+
+function extractReceiverTextForMemberOccurrence(
+  lineText: string,
+  memberStartCharacter: number
+): string | undefined {
+  if (memberStartCharacter <= 0 || memberStartCharacter > lineText.length) {
+    return undefined;
+  }
+
+  let dotIndex = memberStartCharacter - 1;
+  while (dotIndex >= 0 && /\s/.test(lineText[dotIndex])) {
+    dotIndex -= 1;
+  }
+  if (dotIndex < 0 || lineText[dotIndex] !== ".") {
+    return undefined;
+  }
+
+  const receiverEnd = dotIndex;
+  let cursor = receiverEnd - 1;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let braceDepth = 0;
+
+  while (cursor >= 0) {
+    const ch = lineText[cursor];
+    if (ch === ")") {
+      parenDepth += 1;
+      cursor -= 1;
+      continue;
+    }
+    if (ch === "]") {
+      bracketDepth += 1;
+      cursor -= 1;
+      continue;
+    }
+    if (ch === "}") {
+      braceDepth += 1;
+      cursor -= 1;
+      continue;
+    }
+
+    if (parenDepth > 0) {
+      if (ch === "(") {
+        parenDepth -= 1;
+      }
+      cursor -= 1;
+      continue;
+    }
+    if (bracketDepth > 0) {
+      if (ch === "[") {
+        bracketDepth -= 1;
+      }
+      cursor -= 1;
+      continue;
+    }
+    if (braceDepth > 0) {
+      if (ch === "{") {
+        braceDepth -= 1;
+      }
+      cursor -= 1;
+      continue;
+    }
+
+    const isNamespaceSep =
+      ch === ":" &&
+      ((cursor > 0 && lineText[cursor - 1] === ":") ||
+        (cursor + 1 < lineText.length && lineText[cursor + 1] === ":"));
+    if (isNamespaceSep) {
+      cursor -= 1;
+      continue;
+    }
+
+    if (/\s/.test(ch)) {
+      const previousWord = readPreviousIdentifierToken(lineText, cursor - 1);
+      if (
+        previousWord === "is" ||
+        previousWord === "isnot" ||
+        previousWord === "and" ||
+        previousWord === "or" ||
+        previousWord === "xor"
+      ) {
+        break;
+      }
+      cursor -= 1;
+      continue;
+    }
+
+    if (
+      ch === "," ||
+      ch === ";" ||
+      ch === "=" ||
+      ch === "?" ||
+      ch === ":" ||
+      ch === "+" ||
+      ch === "-" ||
+      ch === "*" ||
+      ch === "/" ||
+      ch === "%" ||
+      ch === "!" ||
+      ch === "&" ||
+      ch === "|" ||
+      ch === "^" ||
+      ch === "(" ||
+      ch === "{"
+    ) {
+      break;
+    }
+
+    cursor -= 1;
+  }
+
+  const receiverStart = cursor + 1;
+  const receiverText = lineText.slice(receiverStart, receiverEnd).trim();
+  return receiverText.length > 0 ? receiverText : undefined;
+}
+
+function readPreviousIdentifierToken(
+  text: string,
+  startIndex: number
+): string | undefined {
+  let end = startIndex;
+  while (end >= 0 && /\s/.test(text[end])) {
+    end -= 1;
+  }
+  if (end < 0 || !/[A-Za-z_]/.test(text[end])) {
+    return undefined;
+  }
+
+  let start = end;
+  while (start >= 0 && /[A-Za-z0-9_]/.test(text[start])) {
+    start -= 1;
+  }
+
+  const token = text.slice(start + 1, end + 1).trim();
+  return token.length > 0 ? token.toLowerCase() : undefined;
 }
 
 function collectParsedMemberSignaturesForOccurrence(
@@ -2932,16 +3431,43 @@ function collectParsedMemberSignaturesForOccurrence(
     if (!signature) {
       continue;
     }
+    const adjustedSignature = adjustKnownMemberSignatureArity(
+      receiverTypeFullName,
+      memberName,
+      signature
+    );
 
-    const key = `${signature.returnType}:${signature.label}`;
+    const key = `${adjustedSignature.returnType}:${adjustedSignature.label}:${adjustedSignature.minArgs}:${adjustedSignature.maxArgs}`;
     if (seen.has(key)) {
       continue;
     }
     seen.add(key);
-    signatures.push(signature);
+    signatures.push(adjustedSignature);
   }
 
   return signatures;
+}
+
+function adjustKnownMemberSignatureArity(
+  receiverTypeFullName: string,
+  memberName: string,
+  signature: ParsedCallableSignature
+): ParsedCallableSignature {
+  if (
+    receiverTypeFullName === "string" &&
+    memberName === "Split" &&
+    signature.minArgs === 2 &&
+    signature.maxArgs === 2 &&
+    signature.parameters.length === 2 &&
+    /^int\b/i.test(signature.parameters[1]?.typeText ?? "")
+  ) {
+    return {
+      ...signature,
+      minArgs: 1
+    };
+  }
+
+  return signature;
 }
 
 function parseCallableSignature(signatureLabel: string): ParsedCallableSignature | undefined {
@@ -3188,20 +3714,6 @@ function buildHandleModeCallDiagnostic(
 
     if (!hasReference) {
       continue;
-    }
-
-    if (hasInout) {
-      return {
-        severity: DiagnosticSeverity.Error,
-        range: offsetToRange(
-          document,
-          argument.start,
-          Math.max(argument.start + 1, argument.end)
-        ),
-        message: `Reference inout parameters are not supported in calls to "${occurrence.name}".`,
-        source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
-        code: callArgumentTypeMismatchCode
-      };
     }
 
     if (hasOut && !isLikelyAssignableReferenceArgument(argument.text)) {
@@ -3532,7 +4044,6 @@ function hasTopLevelConditionalOperator(text: string): boolean {
   let parenDepth = 0;
   let bracketDepth = 0;
   let braceDepth = 0;
-  let angleDepth = 0;
   let inSingleQuote = false;
   let inDoubleQuote = false;
   let escapeNext = false;
@@ -3590,21 +4101,12 @@ function hasTopLevelConditionalOperator(text: string): boolean {
       braceDepth = Math.max(0, braceDepth - 1);
       continue;
     }
-    if (ch === "<") {
-      angleDepth += 1;
-      continue;
-    }
-    if (ch === ">") {
-      angleDepth = Math.max(0, angleDepth - 1);
-      continue;
-    }
 
     if (
       ch === "?" &&
       parenDepth === 0 &&
       bracketDepth === 0 &&
-      braceDepth === 0 &&
-      angleDepth === 0
+      braceDepth === 0
     ) {
       return true;
     }
@@ -3837,7 +4339,26 @@ function evaluateAssignmentCompatibility(
   leftType: string,
   rightType: string | undefined
 ): TypeCompatibility {
-  return evaluateAssignmentOperatorCompatibility(index, operator, leftType, rightType);
+  return evaluateAssignmentOperatorCompatibility(
+    index,
+    operator,
+    normalizeReferenceAssignmentTargetType(leftType),
+    rightType
+  );
+}
+
+function normalizeReferenceAssignmentTargetType(typeText: string): string {
+  if (!typeText.includes("&")) {
+    return typeText;
+  }
+
+  const normalized = normalizeTypeText(typeText)
+    .replace(/&\s*(?:inout|in|out)\b/g, " ")
+    .replace(/\b(?:inout|in|out)\b/g, " ")
+    .replace(/&/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized || typeText;
 }
 
 function evaluateTypeCompatibility(
@@ -5206,7 +5727,34 @@ function isKnownTypeString(
       return true;
     }
 
+    if (isKnownTypeScopedCandidate(index, candidate, knownTypeNames)) {
+      return true;
+    }
+
     if (tryResolveTypeFullNameFromTypeString(index, candidate) !== undefined) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isKnownTypeScopedCandidate(
+  index: CompletionIndex,
+  candidate: string,
+  knownTypeNames?: Set<string>
+): boolean {
+  const parts = candidate
+    .split("::")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  if (parts.length < 2) {
+    return false;
+  }
+
+  for (let i = parts.length - 1; i >= 1; i -= 1) {
+    const prefix = parts.slice(0, i).join("::");
+    if (isKnownTypeName(index, prefix, knownTypeNames)) {
       return true;
     }
   }
@@ -5230,6 +5778,7 @@ function expandTypeLookupCandidates(typeString: string): string[] {
   };
 
   push(normalizedType);
+  push(normalizeArrayBracketShorthand(normalizedType));
   push(stripTrailingIdentifierFromType(normalizedType));
 
   const withoutQualifiers = normalizedType
@@ -5237,6 +5786,7 @@ function expandTypeLookupCandidates(typeString: string): string[] {
     .replace(/\s+/g, " ")
     .trim();
   push(withoutQualifiers);
+  push(normalizeArrayBracketShorthand(withoutQualifiers));
   push(stripTrailingIdentifierFromType(withoutQualifiers));
 
   for (const value of [...candidates]) {
@@ -5244,6 +5794,35 @@ function expandTypeLookupCandidates(typeString: string): string[] {
   }
 
   return [...candidates];
+}
+
+function normalizeArrayBracketShorthand(typeText: string): string {
+  let text = typeText.trim();
+  if (!text.includes("[]")) {
+    return text;
+  }
+
+  let handleSuffix = "";
+  const handleMatch = /([@&]+)$/.exec(text);
+  if (handleMatch) {
+    handleSuffix = handleMatch[1];
+    text = text.slice(0, -handleSuffix.length).trimEnd();
+  }
+
+  let depth = 0;
+  while (text.endsWith("[]")) {
+    depth += 1;
+    text = text.slice(0, -2).trimEnd();
+  }
+  if (depth === 0 || !text) {
+    return typeText.trim();
+  }
+
+  let converted = text;
+  for (let i = 0; i < depth; i += 1) {
+    converted = `array<${converted}>`;
+  }
+  return `${converted}${handleSuffix}`.trim();
 }
 
 function stripTrailingIdentifierFromType(typeText: string): string {
@@ -5358,6 +5937,16 @@ function isIdentifierPartChar(ch: string | undefined): boolean {
   return /[A-Za-z0-9_]/.test(ch);
 }
 
+function isEffectivelyUnknownArgumentType(
+  typeText: string | undefined
+): boolean {
+  if (typeof typeText !== "string" || typeText.trim().length === 0) {
+    return true;
+  }
+  const descriptor = parseTypeDescriptor(typeText);
+  return descriptor?.isAny ?? false;
+}
+
 function containsUnqualifiedIdentifierToken(text: string, name: string): boolean {
   if (!text || !name) {
     return false;
@@ -5368,6 +5957,9 @@ function containsUnqualifiedIdentifierToken(text: string, name: string): boolean
   for (const match of text.matchAll(pattern)) {
     const start = match.index ?? -1;
     if (start < 0) {
+      continue;
+    }
+    if (isOffsetInsideQuotedLiteral(text, start)) {
       continue;
     }
 
@@ -5383,6 +5975,44 @@ function containsUnqualifiedIdentifierToken(text: string, name: string): boolean
     }
     return true;
   }
+  return false;
+}
+
+function isOffsetInsideQuotedLiteral(text: string, offset: number): boolean {
+  if (offset < 0 || offset >= text.length) {
+    return false;
+  }
+
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escapeNext = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    if (i === offset) {
+      return inSingleQuote || inDoubleQuote;
+    }
+
+    const ch = text[i];
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if ((inSingleQuote || inDoubleQuote) && ch === "\\") {
+      escapeNext = true;
+      continue;
+    }
+
+    if (!inDoubleQuote && ch === "'") {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+    if (!inSingleQuote && ch === "\"") {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+  }
+
   return false;
 }
 
@@ -5515,6 +6145,12 @@ function isKnownNamespaceQualifiedIdentifier(
     return true;
   }
 
+  if (
+    isTypeScopedQualifiedPath(qualifiedName, index, allAnalyses, knownTypeNames)
+  ) {
+    return true;
+  }
+
   return allAnalyses.some((analysis) =>
     analysis.globalDeclarations.some((declaration) => {
       if (!declaration.name.startsWith(`${parentNamespace}::`)) {
@@ -5523,6 +6159,36 @@ function isKnownNamespaceQualifiedIdentifier(
       return (declaration.name.split("::").pop() ?? "") === symbolName;
     })
   );
+}
+
+function isTypeScopedQualifiedPath(
+  qualifiedName: string,
+  index: CompletionIndex,
+  allAnalyses: DocumentAnalysis[],
+  knownTypeNames?: Set<string>
+): boolean {
+  const parts = qualifiedName.split("::").filter((part) => part.length > 0);
+  if (parts.length < 2) {
+    return false;
+  }
+
+  for (let i = parts.length - 1; i >= 1; i -= 1) {
+    const typePrefix = parts.slice(0, i).join("::");
+    if (isKnownTypeName(index, typePrefix, knownTypeNames)) {
+      return true;
+    }
+    if (
+      allAnalyses.some((analysis) =>
+        analysis.typeDeclarations.some(
+          (declaration) => declaration.fullName === typePrefix
+        )
+      )
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function isKnownWorkspaceQualifiedIdentifier(
@@ -5583,6 +6249,85 @@ function isKnownNamespacePath(
     }
     for (const callableName of analysis.declaredCallableNames) {
       if (callableName.startsWith(prefix)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function isInKnownTypeScopedQualifiedChain(
+  document: TextDocument,
+  occurrence: DocumentAnalysis["occurrences"][number],
+  index: CompletionIndex,
+  allAnalyses: DocumentAnalysis[],
+  knownTypeNames?: Set<string>,
+  lineTextCache?: Map<number, string>
+): boolean {
+  const lineText = getLineText(document, occurrence.range.start.line, lineTextCache);
+  if (!lineText.includes("::")) {
+    return false;
+  }
+
+  const occurrenceStart = occurrence.range.start.character;
+  const occurrenceEnd = occurrence.range.end.character;
+  const qualifiedPathPattern =
+    /[A-Za-z_][A-Za-z0-9_]*(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)+/g;
+
+  let match: RegExpExecArray | null;
+  while ((match = qualifiedPathPattern.exec(lineText)) !== null) {
+    const matchStart = match.index ?? -1;
+    if (matchStart < 0) {
+      continue;
+    }
+    const rawPath = match[0];
+    const matchEnd = matchStart + rawPath.length;
+    if (occurrenceStart < matchStart || occurrenceEnd > matchEnd) {
+      continue;
+    }
+
+    const segments: Array<{ name: string; start: number; end: number }> = [];
+    const segmentPattern = /[A-Za-z_][A-Za-z0-9_]*/g;
+    let segmentMatch: RegExpExecArray | null;
+    while ((segmentMatch = segmentPattern.exec(rawPath)) !== null) {
+      const localStart = segmentMatch.index ?? -1;
+      if (localStart < 0) {
+        continue;
+      }
+      const name = segmentMatch[0];
+      segments.push({
+        name,
+        start: matchStart + localStart,
+        end: matchStart + localStart + name.length
+      });
+    }
+    if (segments.length < 2) {
+      continue;
+    }
+
+    const segmentIndex = segments.findIndex(
+      (segment) =>
+        occurrenceStart >= segment.start &&
+        occurrenceEnd <= segment.end &&
+        occurrence.name === segment.name
+    );
+    if (segmentIndex <= 0) {
+      continue;
+    }
+
+    for (let i = segmentIndex - 1; i >= 0; i -= 1) {
+      const prefix = segments.slice(0, i + 1).map((segment) => segment.name).join("::");
+      if (isKnownTypeName(index, prefix, knownTypeNames)) {
+        return true;
+      }
+      if (
+        allAnalyses.some((analysis) =>
+          analysis.typeDeclarations.some(
+            (declaration) => declaration.fullName === prefix
+          )
+        )
+      ) {
         return true;
       }
     }
@@ -5753,6 +6498,33 @@ function isKnownTypeName(
   }
 
   return index.typeFullNamesByShortName.has(identifier);
+}
+
+function isDictionaryLikeType(typeFullName: string): boolean {
+  const normalized = normalizeTypeText(typeFullName).toLowerCase();
+  const short = (normalized.split("::").pop() ?? normalized).toLowerCase();
+  return short === "dictionary";
+}
+
+function shouldSuppressKnownEngineMemberGap(
+  receiverTypeFullName: string,
+  memberName: string
+): boolean {
+  const typeName = receiverTypeFullName.toLowerCase();
+  if (
+    (typeName === "game::cgamectnapp" || typeName === "cgamectnapp") &&
+    memberName === "Viewport"
+  ) {
+    return true;
+  }
+  if (
+    (typeName === "trackmania::ctrackmania" || typeName === "ctrackmania") &&
+    (memberName === "Network" || memberName === "Editor")
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 function isInsideAttributeBrackets(

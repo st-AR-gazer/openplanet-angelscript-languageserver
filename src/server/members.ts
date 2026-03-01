@@ -167,12 +167,40 @@ export function findResolvedMember(
   typeFullName: string,
   memberName: string
 ): TypeMemberInfo | undefined {
-  for (const member of getResolvedMembers(index, typeFullName)) {
+  const direct = findMemberByName(getResolvedMembers(index, typeFullName), memberName);
+  if (direct) {
+    return direct;
+  }
+
+  const shortName =
+    index.typeInfoByFullName.get(typeFullName)?.shortName ??
+    (typeFullName.split("::").pop() ?? typeFullName);
+  const typeVariants = index.typeFullNamesByShortName.get(shortName) ?? [];
+  for (const variant of typeVariants) {
+    if (variant === typeFullName) {
+      continue;
+    }
+    const variantMember = findMemberByName(
+      getResolvedMembers(index, variant),
+      memberName
+    );
+    if (variantMember) {
+      return variantMember;
+    }
+  }
+
+  return undefined;
+}
+
+function findMemberByName(
+  members: TypeMemberInfo[],
+  memberName: string
+): TypeMemberInfo | undefined {
+  for (const member of members) {
     if (member.name === memberName) {
       return member;
     }
   }
-
   return undefined;
 }
 
@@ -531,6 +559,18 @@ function resolveMembersRecursive(
 
   const members: TypeMemberInfo[] = [...typeInfo.members];
   const seenNames = new Set<string>(members.map((member) => member.name));
+  const accessorPropertyTypes = collectAccessorPropertyTypes(members);
+  for (const [propertyName, propertyType] of accessorPropertyTypes) {
+    if (seenNames.has(propertyName)) {
+      continue;
+    }
+    seenNames.add(propertyName);
+    members.push({
+      kind: "property",
+      name: propertyName,
+      type: propertyType
+    });
+  }
 
   if (typeInfo.parentShortName) {
     const parentFullName = tryResolveTypeFullNameFromTypeString(
@@ -553,6 +593,69 @@ function resolveMembersRecursive(
   }
 
   return members;
+}
+
+function collectAccessorPropertyTypes(
+  members: TypeMemberInfo[]
+): Map<string, string> {
+  const propertyTypes = new Map<string, string>();
+
+  for (const member of members) {
+    if (member.kind !== "method") {
+      continue;
+    }
+
+    if (
+      member.name.startsWith("get_") &&
+      member.name.length > 4 &&
+      (!member.args || member.args.trim().length === 0) &&
+      member.returnType &&
+      member.returnType !== "void"
+    ) {
+      const propertyName = member.name.slice(4);
+      if (isValidIdentifier(propertyName)) {
+        propertyTypes.set(propertyName, member.returnType);
+      }
+      continue;
+    }
+
+    if (
+      member.name.startsWith("set_") &&
+      member.name.length > 4 &&
+      member.args &&
+      member.args.trim().length > 0
+    ) {
+      const propertyName = member.name.slice(4);
+      if (!isValidIdentifier(propertyName) || propertyTypes.has(propertyName)) {
+        continue;
+      }
+      const firstArgType = extractFirstParameterType(member.args);
+      if (!firstArgType) {
+        continue;
+      }
+      propertyTypes.set(propertyName, firstArgType);
+    }
+  }
+
+  return propertyTypes;
+}
+
+function extractFirstParameterType(argsText: string): string | undefined {
+  const first = argsText.split(",")[0]?.trim();
+  if (!first) {
+    return undefined;
+  }
+
+  const withoutDefault = first.split("=")[0]?.trim() ?? first;
+  if (!withoutDefault) {
+    return undefined;
+  }
+
+  const typeAndName =
+    /^(.*\S)\s+[A-Za-z_][A-Za-z0-9_]*$/.exec(withoutDefault)?.[1] ??
+    withoutDefault;
+  const normalized = typeAndName.trim();
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 function splitByDotsOutsideParens(text: string): string[] {
@@ -700,6 +803,11 @@ export function tryResolveTypeFullNameFromTypeString(
       .replace(/^(const|shared|private|protected|final|override|external)\s+/, "")
       .trim();
   }
+  normalized = normalized
+    .replace(/\b(inout|in|out)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  normalized = normalizeArrayBracketShorthand(normalized);
 
   const genericIndex = normalized.indexOf("<");
   if (genericIndex >= 0) {
@@ -728,4 +836,34 @@ export function tryResolveTypeFullNameFromTypeString(
   }
 
   return candidates[0];
+}
+
+function normalizeArrayBracketShorthand(typeText: string): string {
+  let text = typeText.trim();
+  if (!text.includes("[]")) {
+    return text;
+  }
+
+  let handleSuffix = "";
+  const handleMatch = /([@&]+)$/.exec(text);
+  if (handleMatch) {
+    handleSuffix = handleMatch[1];
+    text = text.slice(0, -handleSuffix.length).trimEnd();
+  }
+
+  let depth = 0;
+  while (text.endsWith("[]")) {
+    depth += 1;
+    text = text.slice(0, -2).trimEnd();
+  }
+  if (depth === 0 || !text) {
+    return typeText.trim();
+  }
+
+  let converted = text;
+  for (let i = 0; i < depth; i += 1) {
+    converted = `array<${converted}>`;
+  }
+
+  return `${converted}${handleSuffix}`.trim();
 }

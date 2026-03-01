@@ -865,25 +865,45 @@ function resolveQualifiedEnumValueType(
     return undefined;
   }
 
-  if (!isEnumTypeName(index, enumTypeName)) {
+  const resolvedEnumTypeName =
+    tryResolveTypeFullNameFromTypeString(index, enumTypeName) ?? enumTypeName;
+
+  if (isEnumTypeName(index, resolvedEnumTypeName)) {
+    const bucket = index.namespaceBuckets.get(resolvedEnumTypeName);
+    if (!bucket) {
+      return undefined;
+    }
+
+    for (const item of bucket.items) {
+      if (item.label !== enumMemberName) {
+        continue;
+      }
+      if (
+        item.kind === CompletionItemKind.EnumMember ||
+        (typeof item.detail === "string" && item.detail.startsWith("Enum value"))
+      ) {
+        return resolvedEnumTypeName;
+      }
+    }
+
     return undefined;
   }
 
-  const bucket = index.namespaceBuckets.get(enumTypeName);
-  if (!bucket) {
+  const resolvedEnumTypeInfo = index.typeInfoByFullName.get(resolvedEnumTypeName);
+  if (!resolvedEnumTypeInfo) {
     return undefined;
   }
 
-  for (const item of bucket.items) {
-    if (item.label !== enumMemberName) {
-      continue;
-    }
-    if (
-      item.kind === CompletionItemKind.EnumMember ||
-      (typeof item.detail === "string" && item.detail.startsWith("Enum value"))
-    ) {
-      return enumTypeName;
-    }
+  if (
+    resolvedEnumTypeInfo.members.some(
+      (member) => member.kind === "property" && member.name === enumMemberName
+    )
+  ) {
+    return resolvedEnumTypeName;
+  }
+
+  if (/^[A-Z][A-Za-z0-9_]*$/.test(enumMemberName)) {
+    return resolvedEnumTypeName;
   }
 
   return undefined;

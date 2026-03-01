@@ -606,6 +606,26 @@ This executes:
 - VSIX packaging
 - VSIX content smoke check
 
+For false-positive regression blocking against real suite compile output, run:
+
+```powershell
+npm run release:verify:false-positives -- --suite PlayerSearchSuite
+```
+
+This gate always enforces `--fail-on-false-positives` on top of `test:suite-compiler-diff`.
+
+Optional helper env vars:
+- `OPAS_PARITY_SUITE`
+- `OPAS_PARITY_PLUGINS` (comma-separated plugin names)
+- `OPAS_PARITY_INCLUDE_WARNINGS` (`true` / `false`)
+- `OPAS_PARITY_SKIP_COMPILE` (`true` / `false`)
+
+Full strict local release gate (packaging + parity):
+
+```powershell
+npm run release:verify:strict -- --suite PlayerSearchSuite
+```
+
 ## Current Boundaries
 
 This project is language-server only:

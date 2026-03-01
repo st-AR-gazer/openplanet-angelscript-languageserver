@@ -302,6 +302,15 @@ function registerSymbol(symbol: BoundSymbol, context: BinderContext): void {
   existing.push(symbol);
   context.symbolsByFullName.set(symbol.fullName, existing);
 
+  if (
+    symbol.kind === "namespace" ||
+    symbol.kind === "function" ||
+    symbol.kind === "import" ||
+    symbol.kind === "funcdef"
+  ) {
+    return;
+  }
+
   const scopeKey = `${symbol.scopePath}|${symbol.kind}|${symbol.name}`;
   const previous = context.seenByScopeAndKind.get(scopeKey);
   if (!previous) {

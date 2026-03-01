@@ -164,7 +164,13 @@ const invalidLocalTypeKeywords = new Set<string>([
   "catch",
   "do",
   "try",
-  "throw"
+  "throw",
+  "is",
+  "isnot",
+  "and",
+  "or",
+  "xor",
+  "not"
 ]);
 
 function hasOnlyDoubleColonSeparators(typeText: string): boolean {
@@ -1756,14 +1762,14 @@ function parseTypeDeclarationsFromGrammarProgram(
   visitDeclarations(program.declarations, "");
   if (declarations.length === 0) {
     return parsedTypes.map((typeDeclaration) => ({
-      id: `${document.uri}:${typeDeclaration.start}`,
+      id: `${document.uri}:${typeDeclaration.nameStart}`,
       name: typeDeclaration.name,
       fullName: typeDeclaration.fullName,
       kind: typeDeclaration.kind,
       start: typeDeclaration.start,
       end: typeDeclaration.end,
       range: offsetsToRange(document, typeDeclaration.start, typeDeclaration.end),
-      nameRange: offsetsToRange(document, typeDeclaration.start, typeDeclaration.end)
+      nameRange: offsetsToRange(document, typeDeclaration.nameStart, typeDeclaration.nameEnd)
     }));
   }
 
@@ -1774,14 +1780,14 @@ function parseTypeDeclarationsFromGrammarProgram(
     }
 
     declarations.push({
-      id: `${document.uri}:${parsedType.start}`,
+      id: `${document.uri}:${parsedType.nameStart}`,
       name: parsedType.name,
       fullName: parsedType.fullName,
       kind: parsedType.kind,
       start: parsedType.start,
       end: parsedType.end,
       range: offsetsToRange(document, parsedType.start, parsedType.end),
-      nameRange: offsetsToRange(document, parsedType.start, parsedType.end)
+      nameRange: offsetsToRange(document, parsedType.nameStart, parsedType.nameEnd)
     });
   }
 

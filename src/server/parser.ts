@@ -26,6 +26,8 @@ export interface ParsedTypeNode {
   kind: ParsedTypeKind;
   name: string;
   fullName: string;
+  nameStart: number;
+  nameEnd: number;
   start: number;
   end: number;
 }
@@ -231,38 +233,89 @@ class DocumentStructureParser {
       return undefined;
     }
 
+    const bodyStartIndex = this.findFirstTokenIndex(
+      tokenIndex + 2,
+      scopeEndIndex,
+      ["{", ";"]
+    );
+    const declarationStart = keyword.start;
+    let declarationEnd = nameToken.end;
+    if (bodyStartIndex < 0) {
+      const namespacePrefix =
+        namespaceStack.length > 0 ? `${namespaceStack.join("::")}::` : "";
+      this.typeDeclarations.push({
+        kind: keyword.text,
+        name: nameToken.text,
+        fullName: `${namespacePrefix}${nameToken.text}`,
+        nameStart: nameToken.start,
+        nameEnd: nameToken.end,
+        start: declarationStart,
+        end: declarationEnd
+      });
+      return tokenIndex + 2;
+    }
+
+    const bodyStart = this.tokens[bodyStartIndex];
+    if (bodyStart?.kind !== "symbol") {
+      const namespacePrefix =
+        namespaceStack.length > 0 ? `${namespaceStack.join("::")}::` : "";
+      this.typeDeclarations.push({
+        kind: keyword.text,
+        name: nameToken.text,
+        fullName: `${namespacePrefix}${nameToken.text}`,
+        nameStart: nameToken.start,
+        nameEnd: nameToken.end,
+        start: declarationStart,
+        end: declarationEnd
+      });
+      return bodyStartIndex + 1;
+    }
+
+    if (bodyStart.text === ";") {
+      declarationEnd = bodyStart.end;
+      const namespacePrefix =
+        namespaceStack.length > 0 ? `${namespaceStack.join("::")}::` : "";
+      this.typeDeclarations.push({
+        kind: keyword.text,
+        name: nameToken.text,
+        fullName: `${namespacePrefix}${nameToken.text}`,
+        nameStart: nameToken.start,
+        nameEnd: nameToken.end,
+        start: declarationStart,
+        end: declarationEnd
+      });
+      return bodyStartIndex + 1;
+    }
+
+    const bodyEndIndex = this.findMatchingTokenIndex(bodyStartIndex, "{", "}");
+    if (bodyEndIndex < 0) {
+      declarationEnd = this.text.length;
+      const namespacePrefix =
+        namespaceStack.length > 0 ? `${namespaceStack.join("::")}::` : "";
+      this.typeDeclarations.push({
+        kind: keyword.text,
+        name: nameToken.text,
+        fullName: `${namespacePrefix}${nameToken.text}`,
+        nameStart: nameToken.start,
+        nameEnd: nameToken.end,
+        start: declarationStart,
+        end: declarationEnd
+      });
+      return scopeEndIndex;
+    }
+    declarationEnd = this.tokens[bodyEndIndex].end;
+
     const namespacePrefix =
       namespaceStack.length > 0 ? `${namespaceStack.join("::")}::` : "";
     this.typeDeclarations.push({
       kind: keyword.text,
       name: nameToken.text,
       fullName: `${namespacePrefix}${nameToken.text}`,
-      start: nameToken.start,
-      end: nameToken.end
+      nameStart: nameToken.start,
+      nameEnd: nameToken.end,
+      start: declarationStart,
+      end: declarationEnd
     });
-
-    const bodyStartIndex = this.findFirstTokenIndex(
-      tokenIndex + 2,
-      scopeEndIndex,
-      ["{", ";"]
-    );
-    if (bodyStartIndex < 0) {
-      return tokenIndex + 2;
-    }
-
-    const bodyStart = this.tokens[bodyStartIndex];
-    if (bodyStart?.kind !== "symbol") {
-      return bodyStartIndex + 1;
-    }
-
-    if (bodyStart.text === ";") {
-      return bodyStartIndex + 1;
-    }
-
-    const bodyEndIndex = this.findMatchingTokenIndex(bodyStartIndex, "{", "}");
-    if (bodyEndIndex < 0) {
-      return scopeEndIndex;
-    }
 
     if (keyword.text === "class" || keyword.text === "interface") {
       this.parseScope(bodyStartIndex + 1, bodyEndIndex, namespaceStack);
