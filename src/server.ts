@@ -47,6 +47,8 @@ import {
 } from "./server/completions";
 import {
   buildQuickFixCodeActions,
+  collectWorkspaceTypeCatalog,
+  createWorkspaceTypeAwareIndex,
   getSemanticDiagnostics,
   getSyntaxDiagnostics
 } from "./server/diagnostics";
@@ -317,22 +319,28 @@ connection.onCompletion(
       );
 
       if (dotContext) {
+        const workspaceTypeCatalog = collectWorkspaceTypeCatalog(allAnalyses);
+        const effectiveIndex = createWorkspaceTypeAwareIndex(
+          completionIndex,
+          workspaceTypeCatalog.byFullName
+        );
         const typeContext = getTypeResolutionContextAtPosition(
           document,
           analysis,
           params.position.line,
           params.position.character,
           allAnalyses,
-          scopedReturnTypes
+          scopedReturnTypes,
+          effectiveIndex
         );
         const receiverTypeFullName = tryResolveExpressionTypeFullName(
-          completionIndex,
+          effectiveIndex,
           dotContext.receiverText,
           typeContext
         );
         if (receiverTypeFullName) {
           const memberItems = collectMemberCompletionItems(
-            completionIndex,
+            effectiveIndex,
             receiverTypeFullName,
             dotContext.memberPrefix
           );
@@ -356,6 +364,9 @@ connection.onCompletion(
       activeNamespace,
       settings.completion.shortcuts
     );
+    if (activeNamespace) {
+      return items;
+    }
     return sliceToMaxItems(items);
   }
 );
@@ -470,20 +481,26 @@ connection.onTypeDefinition(async (params): Promise<Location | null> => {
   const analysis = getDocumentAnalysis(document);
   const allAnalyses = await getScopedAnalysesForDocument(document);
   const scopedReturnTypes = collectFunctionReturnTypes(allAnalyses);
+  const workspaceTypeCatalog = collectWorkspaceTypeCatalog(allAnalyses);
+  const effectiveIndex = createWorkspaceTypeAwareIndex(
+    completionIndex,
+    workspaceTypeCatalog.byFullName
+  );
   const typeContext = getTypeResolutionContextAtPosition(
     document,
     analysis,
     params.position.line,
     params.position.character,
     allAnalyses,
-    scopedReturnTypes
+    scopedReturnTypes,
+    effectiveIndex
   );
 
   return getTypeDefinitionAtPosition(
     document,
     analysis,
     allAnalyses,
-    completionIndex,
+    effectiveIndex,
     params.position.line,
     params.position.character,
     typeContext
@@ -501,20 +518,26 @@ connection.onHover(async (params): Promise<Hover | null> => {
   const analysis = getDocumentAnalysis(document);
   const allAnalyses = await getScopedAnalysesForDocument(document);
   const scopedReturnTypes = collectFunctionReturnTypes(allAnalyses);
+  const workspaceTypeCatalog = collectWorkspaceTypeCatalog(allAnalyses);
+  const effectiveIndex = createWorkspaceTypeAwareIndex(
+    completionIndex,
+    workspaceTypeCatalog.byFullName
+  );
   const typeContext = getTypeResolutionContextAtPosition(
     document,
     analysis,
     params.position.line,
     params.position.character,
     allAnalyses,
-    scopedReturnTypes
+    scopedReturnTypes,
+    effectiveIndex
   );
 
   return getHoverAtPosition(
     document,
     params.position.line,
     params.position.character,
-    completionIndex,
+    effectiveIndex,
     typeContext,
     analysis,
     allAnalyses

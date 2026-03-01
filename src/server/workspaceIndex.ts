@@ -422,15 +422,17 @@ async function findImportSourceMatches(
     }
 
     for (const entry of entries) {
-      if (entry.isDirectory() && entry.name.toLowerCase() === normalizedModule) {
+      const fullPath = path.join(pluginRoot, entry.name);
+      const entryKind = await resolveDirentKind(pluginRoot, entry);
+      if (entryKind === "directory" && entry.name.toLowerCase() === normalizedModule) {
         matches.push({
           kind: "folder",
-          path: path.join(pluginRoot, entry.name)
+          path: fullPath
         });
         continue;
       }
 
-      if (!entry.isFile()) {
+      if (entryKind !== "file") {
         continue;
       }
       if (!entry.name.toLowerCase().endsWith(".op")) {
@@ -443,12 +445,39 @@ async function findImportSourceMatches(
 
       matches.push({
         kind: "op",
-        path: path.join(pluginRoot, entry.name)
+        path: fullPath
       });
     }
   }
 
   return matches;
+}
+
+async function resolveDirentKind(
+  parentPath: string,
+  entry: Dirent
+): Promise<"directory" | "file" | "other"> {
+  if (entry.isDirectory()) {
+    return "directory";
+  }
+  if (entry.isFile()) {
+    return "file";
+  }
+  if (!entry.isSymbolicLink()) {
+    return "other";
+  }
+
+  try {
+    const resolved = await fs.stat(path.join(parentPath, entry.name));
+    if (resolved.isDirectory()) {
+      return "directory";
+    }
+    if (resolved.isFile()) {
+      return "file";
+    }
+  } catch { }
+
+  return "other";
 }
 
 async function collectFolderAngelScriptFiles(folderPath: string): Promise<string[]> {

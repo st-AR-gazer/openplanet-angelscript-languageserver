@@ -12,6 +12,7 @@ This extension runs an LSP server with incremental text synchronization and prov
   - language keywords
   - root/child namespace suggestions (`Namespace::`)
   - Openplanet symbols from configured symbol sources
+  - built-in `Icons::` and `Icons::Kenney::` icon constants for namespace completion
   - dot-member completion (`receiver.member`) with type-aware filtering
   - member completion rows include property type / method return type
 - Hover:

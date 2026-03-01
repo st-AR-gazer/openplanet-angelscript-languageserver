@@ -24,7 +24,11 @@ import {
   type GrammarStatementNode,
   type GrammarTypeDeclarationNode
 } from "./grammarPipeline";
-import type { TypeResolutionContext } from "./types";
+import {
+  inferExpressionTypeFromText,
+  type ExpressionFunctionSources
+} from "./compilerPipeline";
+import type { CompletionIndex, TypeResolutionContext } from "./types";
 
 export interface VariableDeclaration {
   id: string;
@@ -42,6 +46,7 @@ export interface FunctionDeclaration {
   id: string;
   name: string;
   namespacePath: string;
+  hasDeclarationAttributes: boolean;
   returnType: string;
   argsText: string;
   start: number;
@@ -151,12 +156,53 @@ const invalidLocalTypeKeywords = new Set<string>([
   "while",
   "switch",
   "case",
+  "default",
   "return",
   "break",
   "continue",
   "else",
-  "catch"
+  "catch",
+  "do",
+  "try",
+  "throw"
 ]);
+
+function hasOnlyDoubleColonSeparators(typeText: string): boolean {
+  const compact = typeText.replace(/\s+/g, "");
+  for (let i = 0; i < compact.length; i += 1) {
+    if (compact[i] !== ":") {
+      continue;
+    }
+
+    if (compact[i + 1] !== ":" || compact[i - 1] === ":") {
+      return false;
+    }
+
+    i += 1;
+  }
+
+  return true;
+}
+
+function isPlausibleDeclarationTypeText(rawType: string): boolean {
+  const normalizedType = normalizeTypeText(rawType).trim();
+  if (!normalizedType) {
+    return false;
+  }
+  if (!hasOnlyDoubleColonSeparators(normalizedType)) {
+    return false;
+  }
+  if (invalidLocalTypeKeywords.has(normalizedType.toLowerCase())) {
+    return false;
+  }
+  return true;
+}
+
+const emptyExpressionFunctionSources: ExpressionFunctionSources = {
+  workspaceFunctionSignaturesByName: new Map(),
+  coreFunctionSignaturesByName: new Map(),
+  qualifiedFunctionSignaturesByName: new Map()
+};
 
 interface BlockRange {
   start: number;
@@ -418,7 +464,8 @@ export function getTypeResolutionContextAtPosition(
   lineNumber: number,
   character: number,
   allAnalyses: DocumentAnalysis[],
-  workspaceFunctionReturnTypes?: Map<string, string>
+  workspaceFunctionReturnTypes?: Map<string, string>,
+  completionIndex?: CompletionIndex
 ): TypeResolutionContext {
   const offset = document.offsetAt({ line: lineNumber, character });
   const localVariableTypes = new Map<string, string>();
@@ -428,25 +475,39 @@ export function getTypeResolutionContextAtPosition(
   const activeNamespacePath =
     functionIndex !== undefined ? analysis.functions[functionIndex]?.namespacePath ?? "" : "";
 
-  // Top-level declarations are visible from any function body and from other
-  // top-level initializers in the same scoped analysis set.
   for (const candidate of allAnalyses) {
     if (candidate.uri === analysis.uri) {
       continue;
     }
     for (const declaration of candidate.globalDeclarations) {
+      const declarationType = resolveVisibleDeclarationType(
+        declaration,
+        candidate.text,
+        localVariableTypes,
+        localFunctionReturnTypes,
+        completionIndex
+      );
       addGlobalDeclarationTypeAlias(
         localVariableTypes,
         declaration,
-        activeNamespacePath
+        activeNamespacePath,
+        declarationType
       );
     }
   }
   for (const declaration of analysis.globalDeclarations) {
+    const declarationType = resolveVisibleDeclarationType(
+      declaration,
+      analysis.text,
+      localVariableTypes,
+      localFunctionReturnTypes,
+      completionIndex
+    );
     addGlobalDeclarationTypeAlias(
       localVariableTypes,
       declaration,
-      activeNamespacePath
+      activeNamespacePath,
+      declarationType
     );
   }
 
@@ -468,7 +529,16 @@ export function getTypeResolutionContextAtPosition(
       continue;
     }
 
-    localVariableTypes.set(declaration.name, declaration.type);
+    localVariableTypes.set(
+      declaration.name,
+      resolveVisibleDeclarationType(
+        declaration,
+        analysis.text,
+        localVariableTypes,
+        localFunctionReturnTypes,
+        completionIndex
+      )
+    );
   }
 
   return { localVariableTypes, localFunctionReturnTypes };
@@ -477,9 +547,10 @@ export function getTypeResolutionContextAtPosition(
 function addGlobalDeclarationTypeAlias(
   localVariableTypes: Map<string, string>,
   declaration: VariableDeclaration,
-  activeNamespacePath: string
+  activeNamespacePath: string,
+  declarationType: string
 ): void {
-  localVariableTypes.set(declaration.name, declaration.type);
+  localVariableTypes.set(declaration.name, declarationType);
 
   const namespaceSeparator = declaration.name.lastIndexOf("::");
   if (namespaceSeparator < 0) {
@@ -495,7 +566,150 @@ function addGlobalDeclarationTypeAlias(
     return;
   }
 
-  localVariableTypes.set(shortName, declaration.type);
+  localVariableTypes.set(shortName, declarationType);
+}
+
+function resolveVisibleDeclarationType(
+  declaration: VariableDeclaration,
+  sourceText: string,
+  visibleVariableTypes: Map<string, string>,
+  visibleFunctionReturnTypes: Map<string, string>,
+  completionIndex?: CompletionIndex
+): string {
+  const declaredType = declaration.type;
+  if (!completionIndex || !isAutoTypeDeclaration(declaredType)) {
+    return declaredType;
+  }
+
+  const initializer = getInitializerForDeclaration(sourceText, declaration.end);
+  if (!initializer) {
+    return declaredType;
+  }
+
+  const inferredType = inferExpressionTypeFromText(completionIndex, initializer, {
+    localVariableTypes: visibleVariableTypes,
+    localFunctionReturnTypes: visibleFunctionReturnTypes,
+    functionSources: emptyExpressionFunctionSources
+  });
+  if (!inferredType || isAutoTypeDeclaration(inferredType)) {
+    return declaredType;
+  }
+
+  return normalizeTypeText(inferredType) || inferredType;
+}
+
+function isAutoTypeDeclaration(typeText: string): boolean {
+  const normalized = normalizeTypeText(typeText)
+    .replace(/\bconst\b/g, " ")
+    .replace(/[@&]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  return normalized === "auto";
+}
+
+function getInitializerForDeclaration(
+  text: string,
+  declarationEndOffset: number
+): string | undefined {
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let braceDepth = 0;
+  let angleDepth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escapeNext = false;
+  let equalsOffset = -1;
+
+  for (let i = declarationEndOffset; i < text.length; i += 1) {
+    const ch = text[i];
+    const next = i + 1 < text.length ? text[i + 1] : "";
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (inSingleQuote || inDoubleQuote) {
+      if (ch === "\\") {
+        escapeNext = true;
+      } else if (inSingleQuote && ch === "'") {
+        inSingleQuote = false;
+      } else if (inDoubleQuote && ch === "\"") {
+        inDoubleQuote = false;
+      }
+      continue;
+    }
+
+    if (ch === "'") {
+      inSingleQuote = true;
+      continue;
+    }
+    if (ch === "\"") {
+      inDoubleQuote = true;
+      continue;
+    }
+    if (ch === "(") {
+      parenDepth += 1;
+      continue;
+    }
+    if (ch === ")") {
+      parenDepth = Math.max(0, parenDepth - 1);
+      continue;
+    }
+    if (ch === "[") {
+      bracketDepth += 1;
+      continue;
+    }
+    if (ch === "]") {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+      continue;
+    }
+    if (ch === "{") {
+      braceDepth += 1;
+      continue;
+    }
+    if (ch === "}") {
+      braceDepth = Math.max(0, braceDepth - 1);
+      continue;
+    }
+    if (ch === "<") {
+      angleDepth += 1;
+      continue;
+    }
+    if (ch === ">") {
+      angleDepth = Math.max(0, angleDepth - 1);
+      continue;
+    }
+
+    const atTopLevel =
+      parenDepth === 0 &&
+      bracketDepth === 0 &&
+      braceDepth === 0 &&
+      angleDepth === 0;
+
+    if (atTopLevel && (ch === ";" || ch === ",") && equalsOffset >= 0) {
+      const expression = text.slice(equalsOffset + 1, i).trim();
+      return expression.length > 0 ? expression : undefined;
+    }
+
+    if (atTopLevel && (ch === ";" || ch === ",") && equalsOffset < 0) {
+      return undefined;
+    }
+
+    if (
+      atTopLevel &&
+      ch === "=" &&
+      next !== "=" &&
+      text[i - 1] !== "!" &&
+      text[i - 1] !== "<" &&
+      text[i - 1] !== ">"
+    ) {
+      equalsOffset = i;
+    }
+  }
+
+  return undefined;
 }
 
 export function collectFunctionReturnTypes(
@@ -728,6 +942,12 @@ function parseFunctions(
       `${node.openBrace}:${node.closeBrace}`
     );
     const grammarFunction = grammarFunctionWithNamespace?.declaration;
+    const declarationStartOffset = grammarFunction?.start ?? node.nameStart;
+    const hasDeclarationAttributes = hasDeclarationAttributesBeforeName(
+      maskedText,
+      declarationStartOffset,
+      node.nameStart
+    );
     const blockRanges = buildBlockRanges(maskedText, node.openBrace, node.closeBrace);
     const fallbackParameters = parseParameters(
       document,
@@ -763,6 +983,7 @@ function parseFunctions(
       id: `${document.uri}:${node.nameStart}`,
       name: node.name,
       namespacePath: grammarFunctionWithNamespace?.namespacePath ?? "",
+      hasDeclarationAttributes,
       returnType: grammarFunction?.returnTypeText || node.returnType,
       argsText: argsText.trim(),
       start: node.nameStart,
@@ -779,6 +1000,64 @@ function parseFunctions(
   }
 
   return functions.sort((a, b) => a.bodyStart - b.bodyStart);
+}
+
+function hasDeclarationAttributesBeforeName(
+  text: string,
+  declarationStartOffset: number,
+  declarationNameOffset: number
+): boolean {
+  if (
+    declarationStartOffset < 0 ||
+    declarationNameOffset <= declarationStartOffset ||
+    declarationNameOffset > text.length
+  ) {
+    return false;
+  }
+
+  let cursor = declarationStartOffset;
+  let foundAttribute = false;
+  while (cursor < declarationNameOffset) {
+    while (cursor < declarationNameOffset && /\s/.test(text[cursor] ?? "")) {
+      cursor += 1;
+    }
+    if (cursor >= declarationNameOffset || text[cursor] !== "[") {
+      break;
+    }
+
+    const closeOffset = findMatchingBracketOffset(text, cursor, declarationNameOffset);
+    if (closeOffset < 0) {
+      break;
+    }
+
+    foundAttribute = true;
+    cursor = closeOffset + 1;
+  }
+
+  return foundAttribute;
+}
+
+function findMatchingBracketOffset(
+  text: string,
+  openOffset: number,
+  maxExclusiveOffset: number
+): number {
+  let depth = 0;
+  for (let i = openOffset; i < maxExclusiveOffset; i += 1) {
+    const ch = text[i];
+    if (ch === "[") {
+      depth += 1;
+      continue;
+    }
+    if (ch === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        return i;
+      }
+    }
+  }
+
+  return -1;
 }
 
 function parseParametersFromGrammarFunction(
@@ -829,6 +1108,55 @@ function collectLocalDeclarationsFromGrammarFunction(
   }
 
   const declarations: VariableDeclaration[] = [];
+  const sourceText = document.getText();
+
+  const collectForInitializerDeclarations = (
+    statementStart: number,
+    statementEnd: number
+  ): void => {
+    const openParenOffset = findNextNonWhitespaceIndex(sourceText, statementStart + "for".length);
+    if (openParenOffset < 0 || sourceText[openParenOffset] !== "(") {
+      return;
+    }
+
+    const closeParenOffset = findMatchingDelimiterOffset(
+      sourceText,
+      openParenOffset,
+      statementEnd,
+      "(",
+      ")"
+    );
+    if (closeParenOffset < 0) {
+      return;
+    }
+
+    const initializerStart = openParenOffset + 1;
+    const headerText = sourceText.slice(initializerStart, closeParenOffset);
+    const firstSemicolonInHeader = findTopLevelHeaderDelimiterIndex(headerText, ";");
+    if (firstSemicolonInHeader < 0) {
+      return;
+    }
+
+    const initializerText = headerText.slice(0, firstSemicolonInHeader);
+    const initializerDeclarations = parseForInitializerDeclarations(
+      initializerText,
+      initializerStart
+    );
+
+    for (const declaration of initializerDeclarations) {
+      declarations.push({
+        id: `${document.uri}:${declaration.start}`,
+        name: declaration.name,
+        type: declaration.typeText,
+        start: declaration.start,
+        end: declaration.end,
+        range: offsetsToRange(document, declaration.start, declaration.end),
+        scopeStart: declaration.start,
+        scopeEnd: statementEnd,
+        isParameter: false
+      });
+    }
+  };
 
   const visitStatement = (
     statement: GrammarStatementNode,
@@ -870,6 +1198,10 @@ function collectLocalDeclarationsFromGrammarFunction(
       return;
     }
 
+    if (statement.kind === "for") {
+      collectForInitializerDeclarations(statement.start, statement.end);
+    }
+
     if (statement.kind !== "statement" && statement.body) {
       visitStatement(statement.body, scopeStart, scopeEnd);
     }
@@ -882,6 +1214,65 @@ function collectLocalDeclarationsFromGrammarFunction(
   }
 
   return declarations.sort((a, b) => a.start - b.start);
+}
+
+function parseForInitializerDeclarations(
+  initializerText: string,
+  initializerStartOffset: number
+): Array<{ typeText: string; name: string; start: number; end: number }> {
+  const typeAndDeclarators =
+    /^\s*((?:const\s+)?[A-Za-z_][A-Za-z0-9_:<>@&]*)\s+([\s\S]+)$/.exec(
+      initializerText
+    );
+  if (!typeAndDeclarators) {
+    return [];
+  }
+
+  const typeText = typeAndDeclarators[1].trim();
+  if (!isPlausibleDeclarationTypeText(typeText)) {
+    return [];
+  }
+
+  const declaratorsText = typeAndDeclarators[2];
+  if (!declaratorsText.trim()) {
+    return [];
+  }
+
+  const declaratorsStartOffset =
+    initializerStartOffset + (typeAndDeclarators[0].length - declaratorsText.length);
+  const segments = splitCommaSeparatedWithOffsets(
+    declaratorsText,
+    declaratorsStartOffset
+  );
+  const declarations: Array<{ typeText: string; name: string; start: number; end: number }> = [];
+
+  for (const segment of segments) {
+    const nameMatch = /^\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(segment.text);
+    if (!nameMatch) {
+      continue;
+    }
+
+    const name = nameMatch[1];
+    const nameStartInSegment = segment.text.indexOf(name);
+    if (nameStartInSegment < 0) {
+      continue;
+    }
+
+    const trailing = segment.text.slice(nameStartInSegment + name.length).trimStart();
+    if (trailing.startsWith("(")) {
+      continue;
+    }
+
+    const nameStart = segment.start + nameStartInSegment;
+    declarations.push({
+      typeText,
+      name,
+      start: nameStart,
+      end: nameStart + name.length
+    });
+  }
+
+  return declarations;
 }
 
 function mergeVariableDeclarations(
@@ -1217,7 +1608,7 @@ function recoverVariableDeclaratorsFromStatementText(
 
   const typeText = typeAndDeclarators[1].trim();
   const declaratorsText = typeAndDeclarators[2];
-  if (!typeText || !declaratorsText) {
+  if (!typeText || !declaratorsText || !isPlausibleDeclarationTypeText(typeText)) {
     return [];
   }
 
@@ -1506,12 +1897,8 @@ function parseLocalDeclarations(
   while ((match = localDeclarationPattern.exec(bodyText)) !== null) {
     const fullMatch = match[0];
     const rawType = match[1].trim();
-    const normalizedType = normalizeTypeText(rawType);
     const declarationName = match[2];
-    if (!normalizedType || !declarationName) {
-      continue;
-    }
-    if (invalidLocalTypeKeywords.has(normalizedType)) {
+    if (!declarationName || !isPlausibleDeclarationTypeText(rawType)) {
       continue;
     }
 
@@ -1734,6 +2121,146 @@ function splitCommaSeparatedWithOffsets(
   }
 
   return segments;
+}
+
+function findMatchingDelimiterOffset(
+  text: string,
+  openOffset: number,
+  maxOffset: number,
+  openChar: "(" | "[" | "{",
+  closeChar: ")" | "]" | "}"
+): number {
+  let depth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escapeNext = false;
+
+  const hardLimit = Math.min(maxOffset, text.length - 1);
+  for (let i = openOffset; i <= hardLimit; i += 1) {
+    const ch = text[i];
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (inSingleQuote || inDoubleQuote) {
+      if (ch === "\\") {
+        escapeNext = true;
+      } else if (inSingleQuote && ch === "'") {
+        inSingleQuote = false;
+      } else if (inDoubleQuote && ch === "\"") {
+        inDoubleQuote = false;
+      }
+      continue;
+    }
+
+    if (ch === "'") {
+      inSingleQuote = true;
+      continue;
+    }
+    if (ch === "\"") {
+      inDoubleQuote = true;
+      continue;
+    }
+
+    if (ch === openChar) {
+      depth += 1;
+      continue;
+    }
+    if (ch === closeChar) {
+      depth -= 1;
+      if (depth === 0) {
+        return i;
+      }
+    }
+  }
+
+  return -1;
+}
+
+function findTopLevelHeaderDelimiterIndex(text: string, delimiter: ";" | ","): number {
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let braceDepth = 0;
+  let angleDepth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escapeNext = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (inSingleQuote || inDoubleQuote) {
+      if (ch === "\\") {
+        escapeNext = true;
+      } else if (inSingleQuote && ch === "'") {
+        inSingleQuote = false;
+      } else if (inDoubleQuote && ch === "\"") {
+        inDoubleQuote = false;
+      }
+      continue;
+    }
+
+    if (ch === "'") {
+      inSingleQuote = true;
+      continue;
+    }
+    if (ch === "\"") {
+      inDoubleQuote = true;
+      continue;
+    }
+
+    if (ch === "(") {
+      parenDepth += 1;
+      continue;
+    }
+    if (ch === ")") {
+      parenDepth = Math.max(0, parenDepth - 1);
+      continue;
+    }
+    if (ch === "[") {
+      bracketDepth += 1;
+      continue;
+    }
+    if (ch === "]") {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+      continue;
+    }
+    if (ch === "{") {
+      braceDepth += 1;
+      continue;
+    }
+    if (ch === "}") {
+      braceDepth = Math.max(0, braceDepth - 1);
+      continue;
+    }
+    if (ch === "<") {
+      angleDepth += 1;
+      continue;
+    }
+    if (ch === ">") {
+      angleDepth = Math.max(0, angleDepth - 1);
+      continue;
+    }
+
+    if (
+      ch === delimiter &&
+      parenDepth === 0 &&
+      bracketDepth === 0 &&
+      braceDepth === 0 &&
+      angleDepth === 0
+    ) {
+      return i;
+    }
+  }
+
+  return -1;
 }
 
 function findMatchingBrace(text: string, openBraceOffset: number): number {

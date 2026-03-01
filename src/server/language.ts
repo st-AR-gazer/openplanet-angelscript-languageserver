@@ -28,12 +28,14 @@ const disallowedDeclarationIdentifierKeywords = new Set<string>([
 
 const disallowedTopLevelFunctionIdentifierKeywords = new Set<string>([
   ...baseDisallowedIdentifierKeywords,
-  "string"
+  "string",
+  "wstring"
 ]);
 
 const disallowedLocalIdentifierKeywords = new Set<string>([
   ...baseDisallowedIdentifierKeywords,
   "string",
+  "wstring",
 ]);
 
 const disallowedParameterIdentifierKeywords = new Set<string>([
@@ -64,7 +66,8 @@ const intrinsicCallableIdentifiers = new Set<string>([
   "uint64",
   "float",
   "double",
-  "string"
+  "string",
+  "wstring"
 ]);
 
 export function isLanguageKeyword(identifier: string): boolean {

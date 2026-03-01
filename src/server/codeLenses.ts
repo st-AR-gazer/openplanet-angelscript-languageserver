@@ -39,6 +39,9 @@ export function getCodeLensesForDocument(
     if (openplanetRuntimeCallbackNames.has(declaration.name)) {
       continue;
     }
+    if (declaration.hasDeclarationAttributes) {
+      continue;
+    }
 
     const references = getReferencesAtPosition(
       document,

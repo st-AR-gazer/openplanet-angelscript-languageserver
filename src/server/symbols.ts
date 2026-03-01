@@ -13,6 +13,7 @@ import type {
   SymbolSettings
 } from "./types";
 import { addSymbol, createCompletionIndex, registerNamespacePath } from "./completions";
+import { openplanetIconNames } from "./icons.generated";
 import {
   registerCoreClassTypeInfo,
   registerGameTypeInfo,
@@ -93,6 +94,7 @@ export async function buildCompletionIndex(
     }
   }
 
+  addBuiltinIconSymbols(index);
   return index;
 }
 
@@ -298,6 +300,35 @@ async function loadCoreSymbolsFromJson(
   }
 
   logger.info(`[symbols] Loaded Openplanet core symbols from ${filePath}`);
+}
+
+function addBuiltinIconSymbols(index: CompletionIndex): void {
+  registerNamespacePath(index, "Icons");
+
+  for (const rawIconName of openplanetIconNames) {
+    const normalizedIconName = rawIconName.trim().replace(/^Icons::/, "");
+    if (!normalizedIconName) {
+      continue;
+    }
+
+    const segments = normalizedIconName
+      .split("::")
+      .map((segment) => segment.trim())
+      .filter((segment) => segment.length > 0);
+    if (segments.length === 0) {
+      continue;
+    }
+
+    const label = segments[segments.length - 1];
+    const iconNamespace =
+      segments.length > 1 ? `Icons::${segments.slice(0, -1).join("::")}` : "Icons";
+
+    addSymbol(index, iconNamespace, {
+      label,
+      kind: CompletionItemKind.Constant,
+      detail: "Openplanet icon"
+    });
+  }
 }
 
 async function loadNextSymbolsFromJson(

@@ -698,12 +698,14 @@ async function collectPluginModuleNames(pluginRoots: string[]): Promise<string[]
     }
 
     for (const entry of entries) {
-      if (entry.isDirectory()) {
+      const fullPath = path.join(pluginRoot, entry.name);
+      const entryKind = await resolveDirentKind(pluginRoot, entry);
+      if (entryKind === "directory") {
         modules.add(entry.name);
         continue;
       }
 
-      if (entry.isFile() && entry.name.toLowerCase().endsWith(".op")) {
+      if (entryKind === "file" && entry.name.toLowerCase().endsWith(".op")) {
         modules.add(entry.name.slice(0, -3));
       }
     }
@@ -793,28 +795,57 @@ async function findImportSourceMatches(
     }
 
     for (const entry of entries) {
-      if (entry.isDirectory() && entry.name.toLowerCase() === normalizedModule) {
+      const fullPath = path.join(pluginRoot, entry.name);
+      const entryKind = await resolveDirentKind(pluginRoot, entry);
+      if (entryKind === "directory" && entry.name.toLowerCase() === normalizedModule) {
         matches.push({
           kind: "folder",
-          path: path.join(pluginRoot, entry.name)
+          path: fullPath
         });
         continue;
       }
 
       if (
-        entry.isFile() &&
+        entryKind === "file" &&
         entry.name.toLowerCase().endsWith(".op") &&
         entry.name.slice(0, -3).toLowerCase() === normalizedModule
       ) {
         matches.push({
           kind: "op",
-          path: path.join(pluginRoot, entry.name)
+          path: fullPath
         });
       }
     }
   }
 
   return matches;
+}
+
+async function resolveDirentKind(
+  parentPath: string,
+  entry: Dirent
+): Promise<"directory" | "file" | "other"> {
+  if (entry.isDirectory()) {
+    return "directory";
+  }
+  if (entry.isFile()) {
+    return "file";
+  }
+  if (!entry.isSymbolicLink()) {
+    return "other";
+  }
+
+  try {
+    const resolved = await fs.stat(path.join(parentPath, entry.name));
+    if (resolved.isDirectory()) {
+      return "directory";
+    }
+    if (resolved.isFile()) {
+      return "file";
+    }
+  } catch { }
+
+  return "other";
 }
 
 async function openImportMatch(match: ImportSourceMatch): Promise<void> {

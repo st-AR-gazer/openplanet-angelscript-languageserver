@@ -553,7 +553,8 @@ function buildUnknownMemberDiagnostic(
     occurrence.range.start.line,
     occurrence.range.start.character,
     allAnalyses,
-    workspaceFunctionReturnTypes
+    workspaceFunctionReturnTypes,
+    index
   );
   const receiverTypeFullName = tryResolveExpressionTypeFullName(
     index,
@@ -898,7 +899,7 @@ interface TypeDescriptor {
   isAny: boolean;
 }
 
-interface WorkspaceTypeCatalog {
+export interface WorkspaceTypeCatalog {
   byFullName: Map<string, TypeInfo>;
   memberVariableTypesByFullName: Map<string, Map<string, string>>;
 }
@@ -1875,8 +1876,8 @@ function buildStrictBinaryCompatibilityDiagnostic(
   const rightIsBool = isBoolTypeName(rightType);
   const leftIsNumeric = isNumericTypeName(leftType);
   const rightIsNumeric = isNumericTypeName(rightType);
-  const leftIsString = isStringTypeName(leftType);
-  const rightIsString = isStringTypeName(rightType);
+  const leftIsString = isTextStringTypeName(leftType);
+  const rightIsString = isTextStringTypeName(rightType);
   if (
     (leftIsBool && rightIsNumeric) ||
     (rightIsBool && leftIsNumeric)
@@ -2275,7 +2276,11 @@ function buildStandaloneAssignmentExpressionDiagnostic(
       functionSources,
       workspaceTypeCatalog
     );
-    if (isMutableIndexedContainerType(indexReceiverType)) {
+    if (
+      !indexReceiverType ||
+      isMutableIndexedContainerType(indexReceiverType) ||
+      hasLikelyWritableIndexer(index, indexReceiverType)
+    ) {
       return undefined;
     }
   }
@@ -2306,6 +2311,15 @@ function isMutableIndexedContainerType(typeText: string | undefined): boolean {
     return true;
   }
 
+  const normalizedNoQualifier = normalizedType
+    .replace(/\b(?:in|out|inout)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/[@&]+$/g, "")
+    .trim();
+  if (/\[\s*]$/.test(normalizedNoQualifier)) {
+    return true;
+  }
+
   const descriptor = parseTypeDescriptor(typeText);
   if (!descriptor) {
     return false;
@@ -2314,10 +2328,47 @@ function isMutableIndexedContainerType(typeText: string | undefined): boolean {
   if (mutableIndexedObjectTypeNames.has(descriptor.base.toLowerCase())) {
     return true;
   }
-  return indexedContainerTypeNames.has(descriptor.shortBase);
+  return (
+    indexedContainerTypeNames.has(descriptor.shortBase) ||
+    intrinsicGenericTypeBases.has(descriptor.shortBase)
+  );
 }
 
-function collectWorkspaceTypeCatalog(
+function hasLikelyWritableIndexer(
+  index: CompletionIndex,
+  typeText: string | undefined
+): boolean {
+  if (!typeText || /\bconst\b/i.test(typeText)) {
+    return false;
+  }
+
+  const descriptor = parseTypeDescriptor(typeText);
+  const candidates = [
+    descriptor?.normalized,
+    descriptor?.base,
+    normalizeTypeText(typeText).trim()
+  ].filter((value): value is string => !!value && value.length > 0);
+
+  for (const candidate of candidates) {
+    const fullName = tryResolveTypeFullNameFromTypeString(index, candidate);
+    if (!fullName) {
+      continue;
+    }
+
+    const members = getResolvedMembersForType(index, fullName);
+    if (
+      members.some(
+        (member) => member.kind === "method" && member.name === "opIndex"
+      )
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function collectWorkspaceTypeCatalog(
   allAnalyses: DocumentAnalysis[]
 ): WorkspaceTypeCatalog {
   const byFullName = new Map<string, TypeInfo>();
@@ -2510,7 +2561,7 @@ function mergeTypeMembers(
   return merged;
 }
 
-function createWorkspaceTypeAwareIndex(
+export function createWorkspaceTypeAwareIndex(
   index: CompletionIndex,
   workspaceTypesByFullName: Map<string, TypeInfo>
 ): CompletionIndex {
@@ -2856,7 +2907,8 @@ function resolveMemberReceiverTypeAtOccurrence(
     occurrence.range.start.line,
     occurrence.range.start.character,
     allAnalyses,
-    workspaceFunctionReturnTypes
+    workspaceFunctionReturnTypes,
+    index
   );
   return tryResolveExpressionTypeFullName(index, receiverText, typeContext);
 }
@@ -3029,7 +3081,8 @@ function inferExpressionTypeAtOffset(
     position.line,
     position.character,
     allAnalyses,
-    workspaceFunctionReturnTypes
+    workspaceFunctionReturnTypes,
+    index
   );
 
   const effectiveFunctionSources =
@@ -3127,26 +3180,11 @@ function buildHandleModeCallDiagnostic(
     }
 
     const parameterText = parameter.rawText.toLowerCase();
-    const hasHandle = parameterText.includes("@");
     const hasReference = parameterText.includes("&");
 
     const hasInout = /\binout\b/.test(parameterText);
     const hasOut = hasInout || /\bout\b/.test(parameterText);
     const hasIn = hasInout || /\bin\b/.test(parameterText);
-
-    if (hasHandle && (hasIn || hasOut)) {
-      return {
-        severity: DiagnosticSeverity.Error,
-        range: offsetToRange(
-          document,
-          argument.start,
-          Math.max(argument.start + 1, argument.end)
-        ),
-        message: `Handle parameters cannot use in/out modifiers in calls to "${occurrence.name}".`,
-        source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
-        code: callArgumentTypeMismatchCode
-      };
-    }
 
     if (!hasReference) {
       continue;
@@ -3744,7 +3782,7 @@ function inferBinaryOperatorResultType(
     if (isBoolTypeName(leftType) && isBoolTypeName(rightType)) {
       return "bool";
     }
-    if (isStringTypeName(leftType) && isStringTypeName(rightType)) {
+    if (isTextStringTypeName(leftType) && isTextStringTypeName(rightType)) {
       return "bool";
     }
     const normalizedLeft = normalizeTypeText(leftType || "");
@@ -3759,7 +3797,7 @@ function inferBinaryOperatorResultType(
     if (isNumericTypeName(leftType) && isNumericTypeName(rightType)) {
       return "bool";
     }
-    if (isStringTypeName(leftType) && isStringTypeName(rightType)) {
+    if (isTextStringTypeName(leftType) && isTextStringTypeName(rightType)) {
       return "bool";
     }
     return undefined;
@@ -3769,8 +3807,10 @@ function inferBinaryOperatorResultType(
     return leftType && rightType ? "bool" : undefined;
   }
 
-  if (operator === "+" && (isStringTypeName(leftType) || isStringTypeName(rightType))) {
-    return "string";
+  if (operator === "+" && (isTextStringTypeName(leftType) || isTextStringTypeName(rightType))) {
+    return isWideStringTypeName(leftType) || isWideStringTypeName(rightType)
+      ? "wstring"
+      : "string";
   }
 
   if (operator === "%" && isIntegerTypeName(leftType) && isIntegerTypeName(rightType)) {
@@ -3832,8 +3872,12 @@ function evaluateTypeCompatibility(
     return "compatible";
   }
 
-  if (isBoolTypeName(expected.normalized) || isStringTypeName(expected.normalized)) {
+  if (isBoolTypeName(expected.normalized)) {
     return expected.shortBase === actual.shortBase ? "compatible" : "incompatible";
+  }
+
+  if (isTextStringTypeName(expected.normalized)) {
+    return isTextStringTypeName(actual.normalized) ? "compatible" : "incompatible";
   }
 
   if (isPrimitiveTypeName(expected.normalized) && isPrimitiveTypeName(actual.normalized)) {
@@ -4711,7 +4755,7 @@ function isPrimitiveTypeName(typeName: string | undefined): boolean {
   return (
     isBoolTypeName(typeName) ||
     isNumericTypeName(typeName) ||
-    isStringTypeName(typeName)
+    isTextStringTypeName(typeName)
   );
 }
 
@@ -4727,6 +4771,17 @@ function isStringTypeName(typeName: string | undefined): boolean {
     return false;
   }
   return (typeName.split("::").pop() ?? typeName).toLowerCase() === "string";
+}
+
+function isWideStringTypeName(typeName: string | undefined): boolean {
+  if (!typeName) {
+    return false;
+  }
+  return (typeName.split("::").pop() ?? typeName).toLowerCase() === "wstring";
+}
+
+function isTextStringTypeName(typeName: string | undefined): boolean {
+  return isStringTypeName(typeName) || isWideStringTypeName(typeName);
 }
 
 function isNumericTypeName(typeName: string | undefined): boolean {

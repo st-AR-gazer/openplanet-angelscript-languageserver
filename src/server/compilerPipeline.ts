@@ -1,5 +1,5 @@
 import { CompletionItemKind } from "vscode-languageserver/node";
-import { normalizeTypeText } from "./language";
+import { isIntrinsicCallableIdentifier, normalizeTypeText } from "./language";
 import {
   findResolvedMember,
   getResolvedMembersForType,
@@ -278,6 +278,7 @@ const assignmentOperatorMethodNames = new Map<
 ]);
 
 const reverseBinaryOperatorSuffix = "_r";
+const activeUserDefinedConversionKeys = new Set<string>();
 
 const indexedContainerTypeNames = new Set<string>([
   "array",
@@ -561,7 +562,7 @@ export function evaluateAssignmentOperatorCompatibility(
   }
 
   if (operator === "+=") {
-    if (isStringTypeName(left.normalized) && right) {
+    if (isTextStringTypeName(left.normalized) && right) {
       return "compatible";
     }
     if (isNumericTypeName(left.normalized) && right && isNumericTypeName(right.normalized)) {
@@ -1076,7 +1077,7 @@ function inferBinaryExpressionType(
     if (isNumericTypeName(leftType) && isNumericTypeName(rightType)) {
       return "bool";
     }
-    if (isStringTypeName(leftType) && isStringTypeName(rightType)) {
+    if (isTextStringTypeName(leftType) && isTextStringTypeName(rightType)) {
       return "bool";
     }
     const overload = resolveBinaryOperatorOverload(index, operator, leftType, rightType);
@@ -1090,8 +1091,10 @@ function inferBinaryExpressionType(
     return leftType || rightType ? "bool" : undefined;
   }
 
-  if (operator === "+" && (isStringTypeName(leftType) || isStringTypeName(rightType))) {
-    return "string";
+  if (operator === "+" && (isTextStringTypeName(leftType) || isTextStringTypeName(rightType))) {
+    return isWideStringTypeName(leftType) || isWideStringTypeName(rightType)
+      ? "wstring"
+      : "string";
   }
 
   if (operator === "+" || operator === "-" || operator === "*" || operator === "/") {
@@ -1372,7 +1375,7 @@ function inferIndexAccessType(
   objectType: string,
   indexType: string | undefined
 ): string | undefined {
-  if (isStringTypeName(objectType)) {
+  if (isTextStringTypeName(objectType)) {
     return "int";
   }
 
@@ -1510,7 +1513,8 @@ function parseCallableParameter(rawParameter: string): ParsedCallableParameter |
 
   typeText = stripTrailingParameterName(typeText);
   const variadic = typeText.includes("...");
-  typeText = normalizeTypeText(typeText.replace(/\.\.\./g, "").trim());
+  typeText = typeText.replace(/\.\.\./g, "").trim();
+  typeText = typeText.replace(/\s+/g, " ");
   if (!typeText) {
     return undefined;
   }
@@ -1579,7 +1583,7 @@ function evaluateConversion(
   if (
     actual.isConst &&
     !expected.isConst &&
-    (expected.isHandle || actual.isHandle || expected.isReference || actual.isReference)
+    (expected.isHandle || expected.isReference)
   ) {
     return { status: "incompatible", cost: 0 };
   }
@@ -1662,10 +1666,21 @@ function evaluateConversion(
     return { status: "compatible", cost: 2 };
   }
 
-  if (isBoolTypeName(expected.normalized) || isStringTypeName(expected.normalized)) {
+  if (isBoolTypeName(expected.normalized)) {
     return expected.shortBase === actual.shortBase
       ? { status: "compatible", cost: 0 }
       : { status: "incompatible", cost: 0 };
+  }
+
+  if (isTextStringTypeName(expected.normalized)) {
+    if (!isTextStringTypeName(actual.normalized)) {
+      return { status: "incompatible", cost: 0 };
+    }
+
+    return {
+      status: "compatible",
+      cost: expected.shortBase === actual.shortBase ? 0 : 1
+    };
   }
 
   if (expected.isPrimitive && actual.isPrimitive) {
@@ -1772,109 +1787,119 @@ function tryResolveUserDefinedConversion(
     return undefined;
   }
 
-  const actualTypeFullName = resolveTypeFullName(index, actual.normalized);
-  const expectedTypeFullName = resolveTypeFullName(index, expected.normalized);
-  const conversionCandidateTypeText = descriptorToTypeText(actual);
-  let best:
-    | {
-        cost: number;
-        bindings: Map<string, TypeDescriptor>;
-      }
-    | undefined;
-
-  const tryCandidateConversion = (
-    candidateDescriptor: TypeDescriptor | undefined,
-    baseCost: number
-  ): void => {
-    if (!candidateDescriptor) {
-      return;
-    }
-
-    const candidateBindings = new Map(templateBindings);
-    const conversion = evaluateConversion(
-      index,
-      expected,
-      candidateDescriptor,
-      candidateBindings,
-      recursionDepth + 1
-    );
-    if (conversion.status !== "compatible") {
-      return;
-    }
-
-    const candidateCost = conversion.cost + baseCost;
-    if (!best || candidateCost < best.cost) {
-      best = {
-        cost: candidateCost,
-        bindings: candidateBindings
-      };
-    }
-  };
-
-  if (actualTypeFullName) {
-    const implicitConversions = collectMethodSignaturesByNames(
-      index,
-      actualTypeFullName,
-      ["opImplConv", "opConv"]
-    );
-    for (const conversion of implicitConversions) {
-      if (conversion.parameters.length !== 0) {
-        continue;
-      }
-      const descriptor = parseTypeDescriptor(conversion.returnType, index);
-      const baseCost = conversion.name === "opImplConv" ? 3 : 5;
-      tryCandidateConversion(descriptor, baseCost);
-    }
+  const cycleKey = `${descriptorToTypeText(expected)}<=${descriptorToTypeText(actual)}`;
+  if (activeUserDefinedConversionKeys.has(cycleKey)) {
+    return undefined;
   }
+  activeUserDefinedConversionKeys.add(cycleKey);
 
-  if (expectedTypeFullName && conversionCandidateTypeText) {
-    const expectedTypeInfo = index.typeInfoByFullName.get(expectedTypeFullName);
-    const expectedTypeName = expectedTypeInfo?.shortName;
-    const constructorMethodNames = expectedTypeName
-      ? [expectedTypeName, "opAssign"]
-      : ["opAssign"];
-    const constructors = collectMethodSignaturesByNames(
-      index,
-      expectedTypeFullName,
-      constructorMethodNames
-    );
+  try {
+    const actualTypeFullName = resolveTypeFullName(index, actual.normalized);
+    const expectedTypeFullName = resolveTypeFullName(index, expected.normalized);
+    const conversionCandidateTypeText = descriptorToTypeText(actual);
+    let best:
+      | {
+          cost: number;
+          bindings: Map<string, TypeDescriptor>;
+        }
+      | undefined;
 
-    for (const constructor of constructors) {
-      if (constructor.parameters.length !== 1) {
-        continue;
-      }
-      const resolution = resolveBestCallableOverload(
-        index,
-        [constructor],
-        [conversionCandidateTypeText]
-      );
-      if (!resolution.matched) {
-        continue;
+    const tryCandidateConversion = (
+      candidateDescriptor: TypeDescriptor | undefined,
+      baseCost: number
+    ): void => {
+      if (!candidateDescriptor) {
+        return;
       }
 
       const candidateBindings = new Map(templateBindings);
-      if (!best || 4 < best.cost) {
+      const conversion = evaluateConversion(
+        index,
+        expected,
+        candidateDescriptor,
+        candidateBindings,
+        recursionDepth + 1
+      );
+      if (conversion.status !== "compatible") {
+        return;
+      }
+
+      const candidateCost = conversion.cost + baseCost;
+      if (!best || candidateCost < best.cost) {
         best = {
-          cost: 4,
+          cost: candidateCost,
           bindings: candidateBindings
         };
       }
+    };
+
+    if (actualTypeFullName) {
+      const implicitConversions = collectMethodSignaturesByNames(
+        index,
+        actualTypeFullName,
+        ["opImplConv", "opConv"]
+      );
+      for (const conversion of implicitConversions) {
+        if (conversion.parameters.length !== 0) {
+          continue;
+        }
+        const descriptor = parseTypeDescriptor(conversion.returnType, index);
+        const baseCost = conversion.name === "opImplConv" ? 3 : 5;
+        tryCandidateConversion(descriptor, baseCost);
+      }
     }
-  }
 
-  if (!best) {
-    return undefined;
-  }
+    if (expectedTypeFullName && conversionCandidateTypeText) {
+      const expectedTypeInfo = index.typeInfoByFullName.get(expectedTypeFullName);
+      const expectedTypeName = expectedTypeInfo?.shortName;
+      const constructorMethodNames = expectedTypeName
+        ? [expectedTypeName, "opAssign"]
+        : ["opAssign"];
+      const constructors = collectMethodSignaturesByNames(
+        index,
+        expectedTypeFullName,
+        constructorMethodNames
+      );
 
-  templateBindings.clear();
-  for (const [name, descriptor] of best.bindings) {
-    templateBindings.set(name, descriptor);
-  }
+      for (const constructor of constructors) {
+        if (constructor.parameters.length !== 1) {
+          continue;
+        }
+        const resolution = resolveBestCallableOverload(
+          index,
+          [constructor],
+          [conversionCandidateTypeText]
+        );
+        if (!resolution.matched) {
+          continue;
+        }
 
-  return {
-    status: "compatible",
-    cost: best.cost
-  };
+        const candidateBindings = new Map(templateBindings);
+        if (!best || 4 < best.cost) {
+          best = {
+            cost: 4,
+            bindings: candidateBindings
+          };
+        }
+      }
+    }
+
+    if (!best) {
+      return undefined;
+    }
+
+    templateBindings.clear();
+    for (const [name, descriptor] of best.bindings) {
+      templateBindings.set(name, descriptor);
+    }
+
+    return {
+      status: "compatible",
+      cost: best.cost
+    };
+  } finally {
+    activeUserDefinedConversionKeys.delete(cycleKey);
+  }
 }
 
 function getInheritanceDistance(
@@ -2239,7 +2264,7 @@ function isPrimitiveTypeName(typeName: string | undefined): boolean {
 
   return (
     isBoolTypeName(typeName) ||
-    isStringTypeName(typeName) ||
+    isTextStringTypeName(typeName) ||
     isNumericTypeName(typeName)
   );
 }
@@ -2256,6 +2281,17 @@ function isStringTypeName(typeName: string | undefined): boolean {
     return false;
   }
   return normalizeShortTypeName(typeName) === "string";
+}
+
+function isWideStringTypeName(typeName: string | undefined): boolean {
+  if (!typeName) {
+    return false;
+  }
+  return normalizeShortTypeName(typeName) === "wstring";
+}
+
+function isTextStringTypeName(typeName: string | undefined): boolean {
+  return isStringTypeName(typeName) || isWideStringTypeName(typeName);
 }
 
 function isNumericTypeName(typeName: string | undefined): boolean {
@@ -3030,6 +3066,9 @@ class ExpressionParser {
     }
     if (token.kind !== "keyword") {
       return false;
+    }
+    if (isIntrinsicCallableIdentifier(token.text)) {
+      return true;
     }
     if (expressionKeywordOperators.has(token.text)) {
       return false;

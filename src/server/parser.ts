@@ -724,6 +724,28 @@ export function tokenizeMaskedText(maskedText: string): ParserToken[] {
       continue;
     }
 
+    if (/[0-9]/.test(ch)) {
+      let j = i + 1;
+      while (j < maskedText.length && /[0-9A-Fa-fxX._]/.test(maskedText[j])) {
+        j += 1;
+      }
+      if (j < maskedText.length && /[eE]/.test(maskedText[j])) {
+        j += 1;
+        if (j < maskedText.length && (maskedText[j] === "+" || maskedText[j] === "-")) {
+          j += 1;
+        }
+        while (j < maskedText.length && /[0-9]/.test(maskedText[j])) {
+          j += 1;
+        }
+      }
+      if (j < maskedText.length && /[fF]/.test(maskedText[j])) {
+        j += 1;
+      }
+
+      i = j;
+      continue;
+    }
+
     if (ch === ":" && maskedText[i + 1] === ":") {
       tokens.push({
         kind: "symbol",

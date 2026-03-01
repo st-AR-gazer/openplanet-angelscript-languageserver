@@ -2,6 +2,7 @@
   "name": "openplanet-angelscript-languageserver",
   "displayName": "Openplanet AngelScript Language Server",
   "description": "Language Server features for Openplanet AngelScript. Pair with openplanet-angelscript-syntax for fast baseline highlighting.",
+  "icon": "icon.png",
   "version": "0.1.2",
   "publisher": "ar",
   "license": "Unlicense",
@@ -285,7 +286,7 @@
           "type": "number",
           "default": 500,
           "minimum": 50,
-          "description": "Maximum completion items returned per request."
+          "description": "Maximum completion items returned per request for global/member completion lists (namespace-qualified completion returns full namespace symbols)."
         },
         "openplanetLanguageServer.completion.shortcuts.math": {
           "type": "boolean",

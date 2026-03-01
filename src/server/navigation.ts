@@ -46,12 +46,36 @@ interface GlobalSymbolTarget {
   declarationRange: Range;
 }
 
-type SymbolTarget = LocalSymbolTarget | GlobalSymbolTarget | FunctionSymbolTarget;
+interface EnumLabelSymbolTarget {
+  kind: "enum-label";
+  name: string;
+  enumFullName: string;
+  namespacePath: string;
+  declarationUri: string;
+  declarationRange: Range;
+  declarationStart: number;
+}
+
+type SymbolTarget =
+  | LocalSymbolTarget
+  | GlobalSymbolTarget
+  | EnumLabelSymbolTarget
+  | FunctionSymbolTarget;
 
 interface SymbolOccurrenceWithUri {
   uri: string;
   analysis: DocumentAnalysis;
   occurrence: IdentifierOccurrence;
+}
+
+interface EnumLabelDeclarationRecord {
+  analysis: DocumentAnalysis;
+  name: string;
+  start: number;
+  end: number;
+  range: Range;
+  enumFullName: string;
+  namespacePath: string;
 }
 
 export type WorkspaceFunctionDeclarationsByName = Map<
@@ -82,6 +106,9 @@ export function getSymbolDefinitionAtPosition(
     return Location.create(target.analysis.uri, target.declarationRange);
   }
   if (target.kind === "global") {
+    return Location.create(target.declarationUri, target.declarationRange);
+  }
+  if (target.kind === "enum-label") {
     return Location.create(target.declarationUri, target.declarationRange);
   }
 
@@ -538,6 +565,25 @@ function resolveSymbolTargetAtOffset(
     }
   }
 
+  if (!occurrence.isCall) {
+    const enumLabelDeclaration = resolveEnumLabelDeclarationAtOccurrence(
+      analysis,
+      allAnalyses,
+      occurrence
+    );
+    if (enumLabelDeclaration) {
+      return {
+        kind: "enum-label",
+        name: enumLabelDeclaration.name,
+        enumFullName: enumLabelDeclaration.enumFullName,
+        namespacePath: enumLabelDeclaration.namespacePath,
+        declarationUri: enumLabelDeclaration.analysis.uri,
+        declarationRange: enumLabelDeclaration.range,
+        declarationStart: enumLabelDeclaration.start
+      };
+    }
+  }
+
   if (occurrence.qualifier !== "none") {
     return undefined;
   }
@@ -593,6 +639,138 @@ function resolveGlobalDeclarationAtOccurrence(
   }
 
   return declarations.find((entry) => entry.analysis.uri === analysis.uri) ?? declarations[0];
+}
+
+function resolveEnumLabelDeclarationAtOccurrence(
+  analysis: DocumentAnalysis,
+  allAnalyses: DocumentAnalysis[],
+  occurrence: IdentifierOccurrence
+): EnumLabelDeclarationRecord | undefined {
+  if (occurrence.qualifier === "dot" || occurrence.isCall) {
+    return undefined;
+  }
+  if (occurrence.qualifier !== "none" && occurrence.qualifier !== "namespace") {
+    return undefined;
+  }
+  if (
+    occurrence.qualifier === "none" &&
+    !isCaseLabelOccurrence(analysis, occurrence)
+  ) {
+    return undefined;
+  }
+
+  const qualifiedPath =
+    occurrence.qualifier === "namespace"
+      ? getQualifiedGlobalNameForOccurrence(analysis, occurrence)
+      : undefined;
+  const records = collectEnumLabelDeclarationRecords(allAnalyses).filter((record) => {
+    if (record.name !== occurrence.name) {
+      return false;
+    }
+
+    if (!qualifiedPath) {
+      return true;
+    }
+
+    const enumScoped = `${record.enumFullName}::${record.name}`;
+    const namespaceScoped = record.namespacePath
+      ? `${record.namespacePath}::${record.name}`
+      : record.name;
+    return qualifiedPath === enumScoped || qualifiedPath === namespaceScoped;
+  });
+
+  if (records.length === 0) {
+    return undefined;
+  }
+
+  return (
+    records.find(
+      (record) =>
+        record.analysis.uri === analysis.uri &&
+        record.start === occurrence.start
+    ) ??
+    records.find((record) => record.analysis.uri === analysis.uri) ??
+    records[0]
+  );
+}
+
+function collectEnumLabelDeclarationRecords(
+  allAnalyses: DocumentAnalysis[]
+): EnumLabelDeclarationRecord[] {
+  const records: EnumLabelDeclarationRecord[] = [];
+
+  for (const analysis of allAnalyses) {
+    const visitDeclarations = (
+      declarations: DocumentAnalysis["grammarProgram"]["declarations"],
+      namespacePath: string
+    ): void => {
+      for (const declaration of declarations) {
+        if (declaration.kind === "namespace") {
+          const childNamespace = namespacePath
+            ? `${namespacePath}::${declaration.name}`
+            : declaration.name;
+          visitDeclarations(declaration.body, childNamespace);
+          continue;
+        }
+
+        if (declaration.kind === "type") {
+          if (declaration.typeKind === "enum") {
+            const enumFullName = namespacePath
+              ? `${namespacePath}::${declaration.name}`
+              : declaration.name;
+            for (const child of declaration.body) {
+              if (child.kind !== "statement") {
+                continue;
+              }
+
+              const statementText = analysis.text.slice(child.start, child.end);
+              const segments = splitTopLevelByCommaWithOffsets(
+                statementText,
+                child.start
+              );
+              for (const segment of segments) {
+                const nameMatch = /^\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(segment.text);
+                if (!nameMatch) {
+                  continue;
+                }
+
+                const name = nameMatch[1];
+                const relativeStart = segment.text.indexOf(name);
+                if (relativeStart < 0) {
+                  continue;
+                }
+
+                const start = segment.start + relativeStart;
+                const end = start + name.length;
+                records.push({
+                  analysis,
+                  name,
+                  start,
+                  end,
+                  range: offsetRange(analysis, start, end),
+                  enumFullName,
+                  namespacePath
+                });
+              }
+            }
+          }
+
+          visitDeclarations(declaration.body, namespacePath);
+        }
+      }
+    };
+
+    visitDeclarations(analysis.grammarProgram.declarations, "");
+  }
+
+  records.sort((a, b) => {
+    if (a.analysis.uri === b.analysis.uri) {
+      return a.start - b.start;
+    }
+    return a.analysis.uri.localeCompare(b.analysis.uri);
+  });
+
+  return records;
 }
 
 function collectGlobalDeclarationsByName(
@@ -737,6 +915,52 @@ function collectSymbolOccurrences(
 
           const declaredGlobalName = globalDeclarationByStart.get(occurrence.start);
           if (occurrence.isDeclaration && declaredGlobalName !== target.name) {
+            continue;
+          }
+        }
+
+        entries.push({
+          uri: analysis.uri,
+          analysis,
+          occurrence
+        });
+      }
+    }
+
+    return dedupeOccurrences(entries);
+  }
+
+  if (target.kind === "enum-label") {
+    const entries: SymbolOccurrenceWithUri[] = [];
+    const expectedScopedName = `${target.enumFullName}::${target.name}`;
+    const expectedNamespaceName = target.namespacePath
+      ? `${target.namespacePath}::${target.name}`
+      : target.name;
+
+    for (const analysis of allAnalyses) {
+      for (const occurrence of analysis.occurrences) {
+        if (
+          occurrence.name !== target.name ||
+          occurrence.isCall ||
+          occurrence.qualifier === "dot"
+        ) {
+          continue;
+        }
+
+        if (occurrence.qualifier === "namespace") {
+          const qualified = getQualifiedGlobalNameForOccurrence(analysis, occurrence);
+          if (
+            qualified !== expectedScopedName &&
+            qualified !== expectedNamespaceName
+          ) {
+            continue;
+          }
+        } else {
+          const isDeclarationMatch =
+            occurrence.isDeclaration &&
+            analysis.uri === target.declarationUri &&
+            occurrence.start === target.declarationStart;
+          if (!isDeclarationMatch && !isCaseLabelOccurrence(analysis, occurrence)) {
             continue;
           }
         }
@@ -1007,6 +1231,59 @@ function findTypeDeclarationByFullNameOrShortName(
   return byShortName;
 }
 
+function offsetRange(
+  analysis: DocumentAnalysis,
+  startOffset: number,
+  endOffset: number
+): Range {
+  return {
+    start: offsetPosition(analysis.text, startOffset),
+    end: offsetPosition(analysis.text, endOffset)
+  };
+}
+
+function offsetPosition(
+  text: string,
+  offset: number
+): { line: number; character: number } {
+  const boundedOffset = Math.max(0, Math.min(offset, text.length));
+  let line = 0;
+  let character = 0;
+
+  for (let i = 0; i < boundedOffset; i += 1) {
+    const ch = text[i];
+    if (ch === "\n") {
+      line += 1;
+      character = 0;
+      continue;
+    }
+
+    if (ch !== "\r") {
+      character += 1;
+    }
+  }
+
+  return { line, character };
+}
+
+function isCaseLabelOccurrence(
+  analysis: DocumentAnalysis,
+  occurrence: IdentifierOccurrence
+): boolean {
+  if (occurrence.qualifier !== "none" || occurrence.isCall) {
+    return false;
+  }
+
+  const lineText = getAnalysisLineText(analysis, occurrence.range.start.line);
+  if (!lineText) {
+    return false;
+  }
+
+  const prefix = lineText.slice(0, occurrence.range.start.character);
+  const suffix = lineText.slice(occurrence.range.end.character);
+  return /\bcase\s+$/.test(prefix) && /^\s*:/.test(suffix);
+}
+
 function normalizeTypeLookupName(typeText: string): string {
   let normalized = typeText.trim();
   if (!normalized) {
@@ -1174,6 +1451,101 @@ function splitTopLevelByComma(text: string): string[] {
 
   parts.push(text.slice(segmentStart).trim());
   return parts.filter((part) => part.length > 0);
+}
+
+function splitTopLevelByCommaWithOffsets(
+  text: string,
+  startOffset: number
+): Array<{ text: string; start: number }> {
+  const segments: Array<{ text: string; start: number }> = [];
+  let segmentStart = 0;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let braceDepth = 0;
+  let angleDepth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escapeNext = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (inSingleQuote || inDoubleQuote) {
+      if (ch === "\\") {
+        escapeNext = true;
+      } else if (inSingleQuote && ch === "'") {
+        inSingleQuote = false;
+      } else if (inDoubleQuote && ch === "\"") {
+        inDoubleQuote = false;
+      }
+      continue;
+    }
+
+    if (ch === "'") {
+      inSingleQuote = true;
+      continue;
+    }
+    if (ch === "\"") {
+      inDoubleQuote = true;
+      continue;
+    }
+    if (ch === "(") {
+      parenDepth += 1;
+      continue;
+    }
+    if (ch === ")") {
+      parenDepth = Math.max(0, parenDepth - 1);
+      continue;
+    }
+    if (ch === "[") {
+      bracketDepth += 1;
+      continue;
+    }
+    if (ch === "]") {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+      continue;
+    }
+    if (ch === "{") {
+      braceDepth += 1;
+      continue;
+    }
+    if (ch === "}") {
+      braceDepth = Math.max(0, braceDepth - 1);
+      continue;
+    }
+    if (ch === "<") {
+      angleDepth += 1;
+      continue;
+    }
+    if (ch === ">") {
+      angleDepth = Math.max(0, angleDepth - 1);
+      continue;
+    }
+
+    if (
+      ch === "," &&
+      parenDepth === 0 &&
+      bracketDepth === 0 &&
+      braceDepth === 0 &&
+      angleDepth === 0
+    ) {
+      segments.push({
+        text: text.slice(segmentStart, i),
+        start: startOffset + segmentStart
+      });
+      segmentStart = i + 1;
+    }
+  }
+
+  segments.push({
+    text: text.slice(segmentStart),
+    start: startOffset + segmentStart
+  });
+  return segments;
 }
 
 function getCallContextAtOffset(

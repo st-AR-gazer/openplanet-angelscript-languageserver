@@ -40,6 +40,7 @@ const builtinTypeNames = new Set<string>([
   "float",
   "double",
   "string",
+  "wstring",
   "vec2",
   "vec3",
   "vec4",
@@ -282,19 +283,24 @@ function buildVariableHover(
   }
 
   const resolvedType = tryResolveTypeFullNameFromTypeString(index, rawType);
-  if (!resolvedType || !resolvedType.includes("::")) {
+  if (!resolvedType) {
+    return null;
+  }
+
+  const resolvedTypeShortName = resolvedType.split("::").pop() ?? resolvedType;
+  if (builtinTypeNames.has(resolvedTypeShortName)) {
     return null;
   }
 
   const links = buildQualifiedTypeDocumentationLinks(resolvedType, index);
-  if (links.length === 0) {
-    return null;
+  if (links.length > 0) {
+    return createMarkdownHover(
+      [`${rawType} ${occurrence.name}`],
+      links.join("\n")
+    );
   }
 
-  return createMarkdownHover(
-    [`${rawType} ${occurrence.name}`],
-    links.join("\n")
-  );
+  return createMarkdownTextHover([`${rawType} ${occurrence.name}`]);
 }
 
 function resolveTypeName(
@@ -391,7 +397,8 @@ function buildMemberHover(
 ): Hover | null {
   const lineText = getLineText(document, lineNumber);
   const beforeWord = lineText.slice(0, identifierStartCharacter);
-  const dotIndex = findLastDotOutsideParens(beforeWord);
+  const topLevelDotIndex = findLastDotOutsideParens(beforeWord);
+  const dotIndex = topLevelDotIndex >= 0 ? topLevelDotIndex : beforeWord.lastIndexOf(".");
   if (dotIndex < 0) {
     return null;
   }
@@ -850,10 +857,67 @@ function extractReceiverExpression(beforeDot: string): string | undefined {
     }
   }
 
+  const unmatchedOpenParen = findLastUnmatchedOpenParen(text);
+  if (unmatchedOpenParen >= 0) {
+    cutIndex = Math.max(cutIndex, unmatchedOpenParen);
+  }
+
   text = text.slice(cutIndex + 1).trim();
   text = text.replace(/^(?:return|yield)\b\s*/, "").trim();
 
   return text.length > 0 ? text : undefined;
+}
+
+function findLastUnmatchedOpenParen(text: string): number {
+  let parenDepth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escapeNext = false;
+
+  for (let i = text.length - 1; i >= 0; i -= 1) {
+    const ch = text[i];
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (ch === "\\") {
+      escapeNext = true;
+      continue;
+    }
+
+    if (!inDoubleQuote && ch === "'") {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+
+    if (!inSingleQuote && ch === "\"") {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+
+    if (inSingleQuote || inDoubleQuote) {
+      continue;
+    }
+
+    if (ch === ")") {
+      parenDepth += 1;
+      continue;
+    }
+
+    if (ch !== "(") {
+      continue;
+    }
+
+    if (parenDepth === 0) {
+      return i;
+    }
+
+    parenDepth = Math.max(0, parenDepth - 1);
+  }
+
+  return -1;
 }
 
 function isControlKeywordBefore(text: string, index: number): boolean {
