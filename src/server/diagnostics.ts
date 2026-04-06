@@ -7,6 +7,7 @@ import {
   WorkspaceEdit
 } from "vscode-languageserver/node";
 import type { TextDocument } from "vscode-languageserver-textdocument";
+import { URI } from "vscode-uri";
 import {
   collectFunctionReturnTypes,
   DocumentAnalysis,
@@ -83,6 +84,7 @@ const inheritanceContractCode = "inheritance-contract-mismatch";
 const importDuplicateDeclarationCode = "import-duplicate-declaration";
 const importDependencyMismatchCode = "import-dependency-mismatch";
 const importForwardedDependencyWarningCode = "import-forwarded-dependency-warning";
+const analysisModuleRootCache = new Map<string, string | undefined>();
 
 const indexedContainerTypeNames = new Set<string>([
   "array",
@@ -1184,6 +1186,7 @@ function collectTypeCompatibilityDiagnostics(
 
     const signatures = collectParsedCallableSignaturesForOccurrence(
       document,
+      analysis,
       allAnalyses,
       index,
       occurrence
@@ -3091,6 +3094,7 @@ function evaluateSignatureCandidateCompatibility(
 
 function collectParsedCallableSignaturesForOccurrence(
   document: TextDocument,
+  analysis: DocumentAnalysis,
   allAnalyses: DocumentAnalysis[],
   index: CompletionIndex,
   occurrence: DocumentAnalysis["occurrences"][number]
@@ -3099,6 +3103,7 @@ function collectParsedCallableSignaturesForOccurrence(
   const seen = new Set<string>();
   const labels = collectCallableSignaturesForOccurrence(
     document,
+    analysis,
     allAnalyses,
     index,
     occurrence
@@ -4123,6 +4128,9 @@ function findTopLevelBinarySplit(
   let bracketDepth = 0;
   let braceDepth = 0;
   let angleDepth = 0;
+  const shouldTrackAngleDepth = operators.some(
+    (operator) => operator.includes("<") || operator.includes(">")
+  );
   let inSingleQuote = false;
   let inDoubleQuote = false;
   let escapeNext = false;
@@ -4191,11 +4199,11 @@ function findTopLevelBinarySplit(
     ) {
       return { index: i, operator: ch };
     }
-    if (ch === ">") {
+    if (ch === ">" && shouldTrackAngleDepth) {
       angleDepth += 1;
       continue;
     }
-    if (ch === "<") {
+    if (ch === "<" && shouldTrackAngleDepth) {
       angleDepth = Math.max(0, angleDepth - 1);
       continue;
     }
@@ -5367,6 +5375,7 @@ function buildArityMismatchDiagnostic(
 
   const signatureLabels = collectCallableSignaturesForOccurrence(
     document,
+    analysis,
     allAnalyses,
     index,
     occurrence
@@ -5407,6 +5416,7 @@ function buildArityMismatchDiagnostic(
 
 function collectCallableSignaturesForOccurrence(
   document: TextDocument,
+  analysis: DocumentAnalysis,
   allAnalyses: DocumentAnalysis[],
   index: CompletionIndex,
   occurrence: DocumentAnalysis["occurrences"][number]
@@ -5430,9 +5440,33 @@ function collectCallableSignaturesForOccurrence(
     return [...signatures];
   }
 
-  for (const analysis of allAnalyses) {
-    for (const declaration of analysis.functions) {
+  const activeNamespacePath = resolveOccurrenceNamespacePath(analysis, occurrence);
+  const usingNamespacePaths = collectUsingNamespacePathsBeforeOffset(
+    analysis.maskedText,
+    occurrence.start
+  );
+  const currentModuleRootPath = getAnalysisModuleRootForUnqualifiedLookup(analysis);
+
+  for (const workspaceAnalysis of allAnalyses) {
+    if (
+      !isAnalysisInSameUnqualifiedLookupModule(
+        currentModuleRootPath,
+        workspaceAnalysis
+      )
+    ) {
+      continue;
+    }
+    for (const declaration of workspaceAnalysis.functions) {
       if (declaration.name !== occurrence.name) {
+        continue;
+      }
+      if (
+        !isUnqualifiedFunctionDeclarationVisibleForOccurrence(
+          declaration.namespacePath,
+          activeNamespacePath,
+          usingNamespacePaths
+        )
+      ) {
         continue;
       }
 
@@ -5447,6 +5481,122 @@ function collectCallableSignaturesForOccurrence(
   }
 
   return [...signatures];
+}
+
+function resolveOccurrenceNamespacePath(
+  analysis: DocumentAnalysis,
+  occurrence: DocumentAnalysis["occurrences"][number]
+): string {
+  if (occurrence.functionIndex !== undefined) {
+    return analysis.functions[occurrence.functionIndex]?.namespacePath ?? "";
+  }
+  return findEnclosingNamespacePathAtOffset(
+    analysis.grammarProgram.declarations,
+    occurrence.start,
+    ""
+  );
+}
+
+function findEnclosingNamespacePathAtOffset(
+  declarations: readonly GrammarDeclarationNodeLike[],
+  offset: number,
+  namespacePath: string
+): string {
+  for (const declaration of declarations) {
+    if (declaration.kind !== "namespace") {
+      continue;
+    }
+    if (offset < declaration.start || offset > declaration.end) {
+      continue;
+    }
+
+    const childNamespacePath = namespacePath
+      ? `${namespacePath}::${declaration.name}`
+      : declaration.name;
+    return findEnclosingNamespacePathAtOffset(
+      declaration.body,
+      offset,
+      childNamespacePath
+    );
+  }
+
+  return namespacePath;
+}
+
+function collectUsingNamespacePathsBeforeOffset(
+  maskedText: string,
+  offset: number
+): Set<string> {
+  const visibleText = maskedText.slice(0, Math.max(0, offset));
+  const namespaces = new Set<string>();
+  const pattern =
+    /\busing\s+namespace\s+([A-Za-z_][A-Za-z0-9_]*(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)*)\s*;/g;
+
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(visibleText)) !== null) {
+    const namespacePath = match[1]
+      .split("::")
+      .map((segment) => segment.trim())
+      .filter((segment) => segment.length > 0)
+      .join("::");
+    if (namespacePath.length > 0) {
+      namespaces.add(namespacePath);
+    }
+  }
+
+  return namespaces;
+}
+
+function isUnqualifiedFunctionDeclarationVisibleForOccurrence(
+  declarationNamespacePath: string,
+  activeNamespacePath: string,
+  usingNamespacePaths: ReadonlySet<string>
+): boolean {
+  if (!declarationNamespacePath) {
+    return true;
+  }
+  if (declarationNamespacePath === activeNamespacePath) {
+    return true;
+  }
+  return usingNamespacePaths.has(declarationNamespacePath);
+}
+
+function getAnalysisModuleRootForUnqualifiedLookup(
+  analysis: DocumentAnalysis
+): string | undefined {
+  if (analysisModuleRootCache.has(analysis.uri)) {
+    return analysisModuleRootCache.get(analysis.uri);
+  }
+
+  let moduleRootPath: string | undefined;
+  try {
+    const fsPath = URI.parse(analysis.uri).fsPath.replace(/\\/g, "/");
+    const marker = "/src/";
+    const markerIndex = fsPath.toLowerCase().indexOf(marker);
+    if (markerIndex > 0) {
+      moduleRootPath = fsPath.slice(0, markerIndex).toLowerCase();
+    }
+  } catch {
+    moduleRootPath = undefined;
+  }
+
+  analysisModuleRootCache.set(analysis.uri, moduleRootPath);
+  return moduleRootPath;
+}
+
+function isAnalysisInSameUnqualifiedLookupModule(
+  currentModuleRootPath: string | undefined,
+  candidateAnalysis: DocumentAnalysis
+): boolean {
+  if (!currentModuleRootPath) {
+    return true;
+  }
+  const candidateModuleRootPath =
+    getAnalysisModuleRootForUnqualifiedLookup(candidateAnalysis);
+  if (!candidateModuleRootPath) {
+    return true;
+  }
+  return candidateModuleRootPath === currentModuleRootPath;
 }
 
 function getCallArgumentCountAtOccurrence(

@@ -37,6 +37,7 @@ interface LocalSymbolTarget {
 interface FunctionSymbolTarget {
   kind: "function";
   name: string;
+  namespacePath?: string;
 }
 
 interface GlobalSymbolTarget {
@@ -117,13 +118,14 @@ export function getSymbolDefinitionAtPosition(
     target.name,
     workspaceFunctionDeclarationsByName
   );
-  if (declarations.length === 0) {
+  const filteredDeclarations = filterFunctionDeclarationsForTarget(declarations, target);
+  if (filteredDeclarations.length === 0) {
     return null;
   }
 
   const preferred =
-    declarations.find((declaration) => declaration.analysis.uri === document.uri) ??
-    declarations[0];
+    filteredDeclarations.find((declaration) => declaration.analysis.uri === document.uri) ??
+    filteredDeclarations[0];
 
   return Location.create(preferred.analysis.uri, preferred.declaration.nameRange);
 }
@@ -170,18 +172,19 @@ export function getImplementationAtPosition(
     target.name,
     workspaceFunctionDeclarationsByName
   );
-  if (declarations.length === 0) {
+  const filteredDeclarations = filterFunctionDeclarationsForTarget(declarations, target);
+  if (filteredDeclarations.length === 0) {
     return null;
   }
 
-  const activeDeclaration = declarations.find(
+  const activeDeclaration = filteredDeclarations.find(
     (entry) =>
       entry.analysis.uri === document.uri &&
       offset >= entry.declaration.nameStart &&
       offset <= entry.declaration.nameEnd
   );
 
-  const implementations = declarations
+  const implementations = filteredDeclarations
     .filter((entry) => {
       if (!activeDeclaration) {
         return true;
@@ -200,7 +203,7 @@ export function getImplementationAtPosition(
     return implementations;
   }
 
-  return declarations.map((entry) =>
+  return filteredDeclarations.map((entry) =>
     Location.create(entry.analysis.uri, entry.declaration.nameRange)
   );
 }
@@ -584,24 +587,88 @@ function resolveSymbolTargetAtOffset(
     }
   }
 
+  const functionTarget = resolveFunctionTargetAtOccurrence(
+    analysis,
+    allAnalyses,
+    occurrence,
+    workspaceFunctionDeclarationsByName
+  );
+  if (functionTarget) {
+    return functionTarget;
+  }
+
+  return undefined;
+}
+
+function resolveFunctionTargetAtOccurrence(
+  analysis: DocumentAnalysis,
+  allAnalyses: DocumentAnalysis[],
+  occurrence: IdentifierOccurrence,
+  workspaceFunctionDeclarationsByName?: WorkspaceFunctionDeclarationsByName
+): FunctionSymbolTarget | undefined {
+  if (occurrence.qualifier === "dot") {
+    return undefined;
+  }
+
+  const declarations = collectFunctionDeclarationsByName(
+    allAnalyses,
+    occurrence.name,
+    workspaceFunctionDeclarationsByName
+  );
+  if (declarations.length === 0) {
+    return undefined;
+  }
+
+  if (occurrence.qualifier === "namespace") {
+    const qualifiedName = getQualifiedGlobalNameForOccurrence(analysis, occurrence);
+    if (!qualifiedName) {
+      return undefined;
+    }
+
+    const matching = declarations.filter(
+      (entry) => getQualifiedFunctionName(entry.declaration) === qualifiedName
+    );
+    if (matching.length === 0) {
+      return undefined;
+    }
+
+    return {
+      kind: "function",
+      name: occurrence.name,
+      namespacePath: getNamespacePathFromQualifiedName(qualifiedName)
+    };
+  }
+
+  const declaration = findFunctionDeclarationAtOccurrence(analysis, occurrence);
+  if (declaration) {
+    return {
+      kind: "function",
+      name: declaration.name,
+      namespacePath: declaration.namespacePath
+    };
+  }
+
   if (occurrence.qualifier !== "none") {
     return undefined;
   }
 
-  if (
-    collectFunctionDeclarationsByName(
-      allAnalyses,
-      occurrence.name,
-      workspaceFunctionDeclarationsByName
-    ).length > 0
-  ) {
-    return {
-      kind: "function",
-      name: occurrence.name
-    };
-  }
+  const resolvedNamespacePath = resolveUnqualifiedFunctionNamespacePathForOccurrence(
+    analysis,
+    allAnalyses,
+    occurrence,
+    workspaceFunctionDeclarationsByName
+  );
 
-  return undefined;
+  return resolvedNamespacePath === undefined
+    ? {
+        kind: "function",
+        name: occurrence.name
+      }
+    : {
+        kind: "function",
+        name: occurrence.name,
+        namespacePath: resolvedNamespacePath
+      };
 }
 
 function resolveGlobalDeclarationAtOccurrence(
@@ -827,6 +894,141 @@ function getQualifiedGlobalNameForOccurrence(
   return `${leftPath}::${occurrence.name}`;
 }
 
+function findFunctionDeclarationAtOccurrence(
+  analysis: DocumentAnalysis,
+  occurrence: IdentifierOccurrence
+): FunctionDeclaration | undefined {
+  return analysis.functions.find(
+    (declaration) => declaration.nameStart === occurrence.start
+  );
+}
+
+function getQualifiedFunctionName(declaration: FunctionDeclaration): string {
+  return declaration.namespacePath
+    ? `${declaration.namespacePath}::${declaration.name}`
+    : declaration.name;
+}
+
+function getNamespacePathFromQualifiedName(qualifiedName: string): string {
+  const separatorIndex = qualifiedName.lastIndexOf("::");
+  return separatorIndex < 0 ? "" : qualifiedName.slice(0, separatorIndex);
+}
+
+function resolveOccurrenceNamespacePath(
+  analysis: DocumentAnalysis,
+  occurrence: IdentifierOccurrence
+): string {
+  if (occurrence.functionIndex !== undefined) {
+    return analysis.functions[occurrence.functionIndex]?.namespacePath ?? "";
+  }
+
+  return findEnclosingNamespacePathAtOffset(
+    analysis.grammarProgram.declarations,
+    occurrence.start,
+    ""
+  );
+}
+
+function findEnclosingNamespacePathAtOffset(
+  declarations: DocumentAnalysis["grammarProgram"]["declarations"],
+  offset: number,
+  namespacePath: string
+): string {
+  for (const declaration of declarations) {
+    if (declaration.kind !== "namespace") {
+      continue;
+    }
+    if (offset < declaration.start || offset > declaration.end) {
+      continue;
+    }
+
+    const childNamespacePath = namespacePath
+      ? `${namespacePath}::${declaration.name}`
+      : declaration.name;
+    return findEnclosingNamespacePathAtOffset(
+      declaration.body,
+      offset,
+      childNamespacePath
+    );
+  }
+
+  return namespacePath;
+}
+
+function collectUsingNamespacePathsBeforeOffset(
+  maskedText: string,
+  offset: number
+): Set<string> {
+  const visibleText = maskedText.slice(0, Math.max(0, offset));
+  const namespaces = new Set<string>();
+  const pattern =
+    /\busing\s+namespace\s+([A-Za-z_][A-Za-z0-9_]*(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)*)\s*;/g;
+
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(visibleText)) !== null) {
+    const namespacePath = match[1]
+      .split("::")
+      .map((segment) => segment.trim())
+      .filter((segment) => segment.length > 0)
+      .join("::");
+    if (namespacePath.length > 0) {
+      namespaces.add(namespacePath);
+    }
+  }
+
+  return namespaces;
+}
+
+function resolveUnqualifiedFunctionNamespacePathForOccurrence(
+  analysis: DocumentAnalysis,
+  allAnalyses: DocumentAnalysis[],
+  occurrence: IdentifierOccurrence,
+  workspaceFunctionDeclarationsByName?: WorkspaceFunctionDeclarationsByName
+): string | undefined {
+  if (occurrence.qualifier !== "none") {
+    return undefined;
+  }
+
+  const declarations = collectFunctionDeclarationsByName(
+    allAnalyses,
+    occurrence.name,
+    workspaceFunctionDeclarationsByName
+  );
+  if (declarations.length === 0) {
+    return undefined;
+  }
+
+  const activeNamespacePath = resolveOccurrenceNamespacePath(analysis, occurrence);
+  if (
+    declarations.some(
+      (entry) => entry.declaration.namespacePath === activeNamespacePath
+    )
+  ) {
+    return activeNamespacePath;
+  }
+
+  if (declarations.some((entry) => entry.declaration.namespacePath === "")) {
+    return "";
+  }
+
+  const usingNamespacePaths = collectUsingNamespacePathsBeforeOffset(
+    analysis.maskedText,
+    occurrence.start
+  );
+  const visibleNamespaces = [
+    ...new Set(
+      declarations
+        .map((entry) => entry.declaration.namespacePath)
+        .filter(
+          (namespacePath) =>
+            namespacePath.length > 0 && usingNamespacePaths.has(namespacePath)
+        )
+    )
+  ];
+
+  return visibleNamespaces.length === 1 ? visibleNamespaces[0] : undefined;
+}
+
 function collectSymbolOccurrences(
   target: SymbolTarget,
   allAnalyses: DocumentAnalysis[]
@@ -977,11 +1179,14 @@ function collectSymbolOccurrences(
   }
 
   const entries: SymbolOccurrenceWithUri[] = [];
+  const declarations = collectFunctionDeclarationsByName(allAnalyses, target.name);
+  const filteredDeclarations = filterFunctionDeclarationsForTarget(declarations, target);
+  const qualifiedDeclarationNames = new Set(
+    filteredDeclarations.map((entry) => getQualifiedFunctionName(entry.declaration))
+  );
+
   for (const analysis of allAnalyses) {
     for (const occurrence of analysis.occurrences) {
-      if (occurrence.qualifier !== "none") {
-        continue;
-      }
       if (occurrence.name !== target.name) {
         continue;
       }
@@ -1002,6 +1207,23 @@ function collectSymbolOccurrences(
         continue;
       }
 
+      if (
+        target.namespacePath !== undefined &&
+        !doesFunctionOccurrenceMatchTarget(
+          analysis,
+          allAnalyses,
+          occurrence,
+          target,
+          qualifiedDeclarationNames
+        )
+      ) {
+        continue;
+      }
+
+      if (target.namespacePath === undefined && occurrence.qualifier !== "none") {
+        continue;
+      }
+
       entries.push({
         uri: analysis.uri,
         analysis,
@@ -1011,6 +1233,55 @@ function collectSymbolOccurrences(
   }
 
   return dedupeOccurrences(entries);
+}
+
+function doesFunctionOccurrenceMatchTarget(
+  analysis: DocumentAnalysis,
+  allAnalyses: DocumentAnalysis[],
+  occurrence: IdentifierOccurrence,
+  target: FunctionSymbolTarget,
+  qualifiedDeclarationNames: ReadonlySet<string>
+): boolean {
+  if (occurrence.qualifier === "namespace") {
+    const qualifiedName = getQualifiedGlobalNameForOccurrence(analysis, occurrence);
+    return !!qualifiedName && qualifiedDeclarationNames.has(qualifiedName);
+  }
+
+  const declaration = findFunctionDeclarationAtOccurrence(analysis, occurrence);
+  if (declaration) {
+    return qualifiedDeclarationNames.has(getQualifiedFunctionName(declaration));
+  }
+
+  if (occurrence.qualifier !== "none") {
+    return false;
+  }
+
+  const resolvedNamespacePath = resolveUnqualifiedFunctionNamespacePathForOccurrence(
+    analysis,
+    allAnalyses,
+    occurrence
+  );
+  if (resolvedNamespacePath === undefined) {
+    return false;
+  }
+
+  const qualifiedName = resolvedNamespacePath
+    ? `${resolvedNamespacePath}::${target.name}`
+    : target.name;
+  return qualifiedDeclarationNames.has(qualifiedName);
+}
+
+function filterFunctionDeclarationsForTarget(
+  declarations: Array<{ analysis: DocumentAnalysis; declaration: FunctionDeclaration }>,
+  target: FunctionSymbolTarget
+): Array<{ analysis: DocumentAnalysis; declaration: FunctionDeclaration }> {
+  if (target.namespacePath === undefined) {
+    return declarations;
+  }
+
+  return declarations.filter(
+    (entry) => entry.declaration.namespacePath === target.namespacePath
+  );
 }
 
 function getLocalDeclarationName(

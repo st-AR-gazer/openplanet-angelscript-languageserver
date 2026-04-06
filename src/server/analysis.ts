@@ -305,7 +305,7 @@ export function analyzeDocument(document: TextDocument): DocumentAnalysis {
     functions,
     occurrences
   );
-  const documentSymbols = buildDocumentSymbols(functions);
+  const documentSymbols = buildDocumentSymbols(functions, grammar.program, document);
 
   return {
     uri: document.uri,
@@ -2031,17 +2031,145 @@ function collectIdentifierOccurrences(
 }
 
 function buildDocumentSymbols(
-  functions: FunctionDeclaration[]
+  functions: FunctionDeclaration[],
+  grammarProgram: GrammarProgramNode,
+  document: TextDocument
 ): DocumentSymbol[] {
-  return functions.map((fn) =>
-    DocumentSymbol.create(
+  const namespaceOffsetRanges = new WeakMap<DocumentSymbol, { start: number; end: number }>();
+  const namespaceSymbols = buildNamespaceDocumentSymbols(
+    grammarProgram.declarations,
+    document,
+    namespaceOffsetRanges
+  );
+
+  const rootSymbols: DocumentSymbol[] = [];
+  rootSymbols.push(...namespaceSymbols);
+
+  for (const fn of functions) {
+    const fnSymbol = DocumentSymbol.create(
       fn.name,
       `${fn.returnType}(${fn.argsText})`,
       SymbolKind.Function,
       fn.range,
       fn.nameRange
-    )
-  );
+    );
+
+    if (!fn.namespacePath) {
+      rootSymbols.push(fnSymbol);
+      continue;
+    }
+
+    const namespaceContainer = findNamespaceSymbolForFunction(
+      namespaceSymbols,
+      namespaceOffsetRanges,
+      fn.namespacePath,
+      fn.start
+    );
+    if (!namespaceContainer) {
+      rootSymbols.push(fnSymbol);
+      continue;
+    }
+
+    if (!namespaceContainer.children) {
+      namespaceContainer.children = [];
+    }
+    namespaceContainer.children.push(fnSymbol);
+  }
+
+  sortDocumentSymbolsByRange(rootSymbols);
+  return rootSymbols;
+}
+
+function buildNamespaceDocumentSymbols(
+  declarations: GrammarDeclarationNode[],
+  document: TextDocument,
+  namespaceOffsetRanges: WeakMap<DocumentSymbol, { start: number; end: number }>
+): DocumentSymbol[] {
+  const symbols: DocumentSymbol[] = [];
+
+  for (const declaration of declarations) {
+    if (declaration.kind !== "namespace") {
+      continue;
+    }
+
+    const children = buildNamespaceDocumentSymbols(
+      declaration.body,
+      document,
+      namespaceOffsetRanges
+    );
+    const symbol = DocumentSymbol.create(
+      declaration.name,
+      "",
+      SymbolKind.Namespace,
+      offsetsToRange(document, declaration.start, declaration.end),
+      offsetsToRange(document, declaration.nameStart, declaration.nameEnd),
+      children
+    );
+    namespaceOffsetRanges.set(symbol, { start: declaration.start, end: declaration.end });
+    symbols.push(symbol);
+  }
+
+  sortDocumentSymbolsByRange(symbols);
+  return symbols;
+}
+
+function findNamespaceSymbolForFunction(
+  rootNamespaces: DocumentSymbol[],
+  namespaceOffsetRanges: WeakMap<DocumentSymbol, { start: number; end: number }>,
+  namespacePath: string,
+  functionStartOffset: number
+): DocumentSymbol | undefined {
+  const segments = namespacePath.split("::").filter((segment) => segment.length > 0);
+  if (segments.length === 0) {
+    return undefined;
+  }
+
+  let current: DocumentSymbol | undefined;
+  let candidates: DocumentSymbol[] = rootNamespaces;
+
+  for (const segment of segments) {
+    const matching = candidates.filter((symbol) => {
+      if (symbol.kind !== SymbolKind.Namespace) {
+        return false;
+      }
+      if (symbol.name !== segment) {
+        return false;
+      }
+
+      const offsets = namespaceOffsetRanges.get(symbol);
+      if (!offsets || (offsets.start === 0 && offsets.end === 0)) {
+        return true;
+      }
+
+      return functionStartOffset >= offsets.start && functionStartOffset <= offsets.end;
+    });
+
+    if (matching.length === 0) {
+      return undefined;
+    }
+
+    current = matching[0];
+    candidates = current.children ?? [];
+  }
+
+  return current;
+}
+
+function sortDocumentSymbolsByRange(symbols: DocumentSymbol[]): void {
+  symbols.sort(compareDocumentSymbolRangeStart);
+  for (const symbol of symbols) {
+    if (symbol.children && symbol.children.length > 0) {
+      sortDocumentSymbolsByRange(symbol.children);
+    }
+  }
+}
+
+function compareDocumentSymbolRangeStart(a: DocumentSymbol, b: DocumentSymbol): number {
+  const lineDiff = a.range.start.line - b.range.start.line;
+  if (lineDiff !== 0) {
+    return lineDiff;
+  }
+  return a.range.start.character - b.range.start.character;
 }
 
 function findNextSignificantToken(

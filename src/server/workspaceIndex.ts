@@ -322,12 +322,19 @@ async function walkDirectory(
   logger: Logger
 ): Promise<void> {
   const stack = [rootDirectory];
+  const visitedDirectories = new Set<string>();
 
   while (stack.length > 0) {
     const currentPath = stack.pop();
     if (!currentPath) {
       continue;
     }
+
+    const currentDirectoryKey = await resolveDirectoryTraversalKey(currentPath);
+    if (visitedDirectories.has(currentDirectoryKey)) {
+      continue;
+    }
+    visitedDirectories.add(currentDirectoryKey);
 
     let entries: Dirent[];
     try {
@@ -342,8 +349,9 @@ async function walkDirectory(
 
     for (const entry of entries) {
       const fullPath = path.join(currentPath, entry.name);
+      const entryKind = await resolveDirentKind(currentPath, entry);
 
-      if (entry.isDirectory()) {
+      if (entryKind === "directory") {
         if (ignoredDirectoryNames.has(entry.name)) {
           continue;
         }
@@ -352,7 +360,7 @@ async function walkDirectory(
         continue;
       }
 
-      if (!entry.isFile()) {
+      if (entryKind !== "file") {
         continue;
       }
 
@@ -371,6 +379,10 @@ async function resolvePluginRoots(
   symbolsBaseUserFolderPath: string
 ): Promise<string[]> {
   const candidates = new Set<string>();
+  const baseUserFolderPath = getBaseUserFolderPath(symbolsBaseUserFolderPath);
+  candidates.add(
+    path.normalize(path.join(baseUserFolderPath, "OpenplanetNext", "Plugins"))
+  );
 
   if (configuredPluginRoots.length > 0) {
     for (const configuredRoot of configuredPluginRoots) {
@@ -384,12 +396,8 @@ async function resolvePluginRoots(
       }
     }
   } else {
-    const baseUserFolderPath = getBaseUserFolderPath(symbolsBaseUserFolderPath);
-    candidates.add(
-      path.normalize(path.join(baseUserFolderPath, "OpenplanetNext", "Plugins"))
-    );
     for (const workspaceRoot of workspaceRoots) {
-      candidates.add(path.normalize(path.join(workspaceRoot, "plugins")));
+      addWorkspacePluginRootCandidates(candidates, workspaceRoot);
     }
   }
 
@@ -411,7 +419,8 @@ async function findImportSourceMatches(
   pluginRoots: string[]
 ): Promise<ImportSourceMatch[]> {
   const normalizedModule = moduleName.toLowerCase();
-  const matches: ImportSourceMatch[] = [];
+  const exactMatches: ImportSourceMatch[] = [];
+  const fuzzyMatches: ImportSourceMatch[] = [];
 
   for (const pluginRoot of pluginRoots) {
     let entries: Dirent[];
@@ -424,11 +433,18 @@ async function findImportSourceMatches(
     for (const entry of entries) {
       const fullPath = path.join(pluginRoot, entry.name);
       const entryKind = await resolveDirentKind(pluginRoot, entry);
-      if (entryKind === "directory" && entry.name.toLowerCase() === normalizedModule) {
-        matches.push({
-          kind: "folder",
-          path: fullPath
-        });
+      if (entryKind === "directory") {
+        if (entry.name.toLowerCase() === normalizedModule) {
+          exactMatches.push({
+            kind: "folder",
+            path: fullPath
+          });
+        } else if (moduleNameMatchesEntryName(moduleName, entry.name)) {
+          fuzzyMatches.push({
+            kind: "folder",
+            path: fullPath
+          });
+        }
         continue;
       }
 
@@ -439,18 +455,21 @@ async function findImportSourceMatches(
         continue;
       }
       const baseName = entry.name.slice(0, -3);
-      if (baseName.toLowerCase() !== normalizedModule) {
-        continue;
+      if (baseName.toLowerCase() === normalizedModule) {
+        exactMatches.push({
+          kind: "op",
+          path: fullPath
+        });
+      } else if (moduleNameMatchesEntryName(moduleName, baseName)) {
+        fuzzyMatches.push({
+          kind: "op",
+          path: fullPath
+        });
       }
-
-      matches.push({
-        kind: "op",
-        path: fullPath
-      });
     }
   }
 
-  return matches;
+  return exactMatches.length > 0 ? exactMatches : fuzzyMatches;
 }
 
 async function resolveDirentKind(
@@ -483,12 +502,19 @@ async function resolveDirentKind(
 async function collectFolderAngelScriptFiles(folderPath: string): Promise<string[]> {
   const files: string[] = [];
   const stack = [folderPath];
+  const visitedDirectories = new Set<string>();
 
   while (stack.length > 0) {
     const currentPath = stack.pop();
     if (!currentPath) {
       continue;
     }
+
+    const currentDirectoryKey = await resolveDirectoryTraversalKey(currentPath);
+    if (visitedDirectories.has(currentDirectoryKey)) {
+      continue;
+    }
+    visitedDirectories.add(currentDirectoryKey);
 
     let entries: Dirent[];
     try {
@@ -499,11 +525,12 @@ async function collectFolderAngelScriptFiles(folderPath: string): Promise<string
 
     for (const entry of entries) {
       const fullPath = path.join(currentPath, entry.name);
-      if (entry.isDirectory()) {
+      const entryKind = await resolveDirentKind(currentPath, entry);
+      if (entryKind === "directory") {
         stack.push(fullPath);
         continue;
       }
-      if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".as")) {
+      if (entryKind !== "file" || !entry.name.toLowerCase().endsWith(".as")) {
         continue;
       }
       files.push(fullPath);
@@ -696,6 +723,14 @@ function decodeTomlString(raw: string): string {
     .replace(/\\t/g, "\t");
 }
 
+async function resolveDirectoryTraversalKey(directoryPath: string): Promise<string> {
+  try {
+    return path.normalize(await fs.realpath(directoryPath)).toLowerCase();
+  } catch {
+    return path.normalize(path.resolve(directoryPath)).toLowerCase();
+  }
+}
+
 async function mapWithConcurrency<TInput, TOutput>(
   inputs: readonly TInput[],
   concurrency: number,
@@ -725,4 +760,50 @@ async function mapWithConcurrency<TInput, TOutput>(
     Array.from({ length: clampedConcurrency }, () => worker())
   );
   return results;
+}
+
+function addWorkspacePluginRootCandidates(
+  candidates: Set<string>,
+  workspaceRoot: string
+): void {
+  const root = path.normalize(workspaceRoot);
+  const parent = path.dirname(root);
+
+  candidates.add(path.normalize(path.join(root, "plugins")));
+  candidates.add(path.normalize(path.join(root, "deps")));
+  candidates.add(root);
+
+  if (parent !== root) {
+    candidates.add(parent);
+    candidates.add(path.normalize(path.join(parent, "plugins")));
+    candidates.add(path.normalize(path.join(parent, "deps")));
+  }
+
+  const rootBase = path.basename(root).toLowerCase();
+  if (parent !== root && (rootBase === "plugins" || rootBase === "deps")) {
+    candidates.add(parent);
+    candidates.add(path.normalize(path.join(parent, "plugins")));
+    candidates.add(path.normalize(path.join(parent, "deps")));
+  }
+}
+
+function moduleNameMatchesEntryName(moduleName: string, entryName: string): boolean {
+  const normalizedModule = normalizeModuleLookup(moduleName);
+  const normalizedEntry = normalizeModuleLookup(entryName);
+  if (!normalizedModule || !normalizedEntry) {
+    return false;
+  }
+  if (normalizedEntry === normalizedModule) {
+    return true;
+  }
+
+  return normalizedModule.length >= 4 && normalizedEntry.endsWith(normalizedModule);
+}
+
+function normalizeModuleLookup(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/\.op$/i, "")
+    .replace(/[^a-z0-9]+/g, "");
 }

@@ -13,7 +13,6 @@ import { getSemanticDiagnostics, getSyntaxDiagnostics } from "../server/diagnost
 import { createDefaultSettings } from "../server/settings";
 import { buildCompletionIndex } from "../server/symbols";
 import { uriToFsPath } from "../server/util";
-import { seedTestSymbols } from "./seedTestSymbols";
 
 type DiagnosticBucket = "ERR" | "WARN" | "INFO";
 
@@ -650,7 +649,6 @@ async function collectLanguageServerDiagnostics(
     }
   };
   const completionIndex = await buildCompletionIndex(settings, logger);
-  seedTestSymbols(completionIndex);
   const workspaceFunctionReturnTypes = collectFunctionReturnTypes(analyses);
 
   const diagnostics: LsDiagnostic[] = [];
@@ -924,6 +922,64 @@ async function pathExists(targetPath: string): Promise<boolean> {
   }
 }
 
+async function collectDependencyAnalysisRoots(
+  lockfile: SuiteLockfile,
+  sourcePlugins: Record<string, SourcePluginRecord>,
+  selectedPluginPaths: string[],
+  compileInvocations: Map<string, CompileInvocationResult>
+): Promise<string[]> {
+  const selectedPathSet = new Set(
+    selectedPluginPaths.map((pluginPath) => normalizeFsPath(path.resolve(pluginPath)))
+  );
+  const dependencyRoots = new Set<string>();
+
+  for (const dependencyName of lockfile.deps_source ?? []) {
+    const candidatePath = path.resolve(sourcePlugins[dependencyName]?.path ?? "");
+    if (!candidatePath) {
+      continue;
+    }
+    if (!(await pathExists(candidatePath))) {
+      continue;
+    }
+    if (selectedPathSet.has(normalizeFsPath(candidatePath))) {
+      continue;
+    }
+    dependencyRoots.add(candidatePath);
+  }
+
+  for (const invocation of compileInvocations.values()) {
+    for (const dependency of invocation.compileResult?.staged_dependencies ?? []) {
+      const sourcePathRaw = String(dependency.source_path ?? "").trim();
+      if (sourcePathRaw.length > 0) {
+        const sourcePath = path.resolve(sourcePathRaw);
+        if (
+          (await pathExists(sourcePath)) &&
+          !selectedPathSet.has(normalizeFsPath(sourcePath))
+        ) {
+          dependencyRoots.add(sourcePath);
+        }
+      }
+
+      const dependencyName = String(dependency.name ?? "").trim();
+      if (dependencyName.length === 0) {
+        continue;
+      }
+      const lockfilePath = path.resolve(sourcePlugins[dependencyName]?.path ?? "");
+      if (!lockfilePath) {
+        continue;
+      }
+      if (
+        (await pathExists(lockfilePath)) &&
+        !selectedPathSet.has(normalizeFsPath(lockfilePath))
+      ) {
+        dependencyRoots.add(lockfilePath);
+      }
+    }
+  }
+
+  return [...dependencyRoots].sort((a, b) => a.localeCompare(b));
+}
+
 async function main(): Promise<void> {
   const options = parseCliArgs(process.argv.slice(2));
   const suiteRoot = path.join(options.suitesRoot, options.suite);
@@ -988,8 +1044,23 @@ async function main(): Promise<void> {
     }
   }
 
+  const dependencyAnalysisRoots = await collectDependencyAnalysisRoots(
+    lockfile,
+    sourcePlugins,
+    selectedPluginPaths,
+    compileInvocations
+  );
+  if (dependencyAnalysisRoots.length > 0) {
+    console.log(
+      `[suite-diff] Dependency analysis roots: ${dependencyAnalysisRoots.join(", ")}`
+    );
+  }
+
   console.log("[suite-diff] Running language-server diagnostics scan...");
-  const lsScan = await collectLanguageServerDiagnostics(selectedPluginPaths);
+  const lsScan = await collectLanguageServerDiagnostics([
+    ...selectedPluginPaths,
+    ...dependencyAnalysisRoots
+  ]);
   const lsDiagnosticsByPlugin = new Map<string, LsDiagnostic[]>();
   for (const pluginName of selectedPluginNames) {
     const pluginPath = path.resolve(sourcePlugins[pluginName]?.path ?? "");

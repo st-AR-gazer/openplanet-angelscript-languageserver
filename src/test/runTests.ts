@@ -13,7 +13,9 @@ import { URI } from "vscode-uri";
 import {
   analyzeDocument,
   collectFunctionReturnTypes,
-  getTypeResolutionContextAtPosition
+  getTypeResolutionContextAtPosition,
+  type DocumentAnalysis,
+  type FunctionDeclaration
 } from "../server/analysis";
 import {
   addSymbol,
@@ -96,6 +98,7 @@ async function main(): Promise<void> {
   testTypeResolution(index);
   testGlobalDeclarationTypeInference(index);
   testCoreAccessorPropertiesFromCoreMethods(index);
+  testCoreMethodDefaultArgumentsPreserved();
   testBindingDuplicateDeclarationDiagnostic(index);
   testBindingUseBeforeDeclarationDiagnostic(index);
   testBindingNestedShadowingDoesNotDuplicate(index);
@@ -128,6 +131,7 @@ async function main(): Promise<void> {
   testCallArgumentTypeInferenceIgnoresInlineComments(index);
   testNamespacedEnumFlagValueAcceptedForIntArgument(index);
   testConditionalInitializerDoesNotEmitBinaryMismatch(index);
+  testNamespacedOverloadDefaultsDoNotCauseAmbiguousUnqualifiedCall(index);
   testOverloadResolutionPrefersExactMatch(index);
   testTemplateSignatureInference(index);
   testOperatorExpressionTypingInCall(index);
@@ -140,6 +144,7 @@ async function main(): Promise<void> {
   testImplicitOperatorConversionCompatibility(index);
   testUserDefinedConversionCycleDoesNotOverflow(index);
   testIndexedOperatorTypeInference(index);
+  testIndexedReceiverMemberResolution(index);
   testMemberCallTypeMismatchDiagnostic(index);
   testReturnTypeMismatchDiagnostic(index);
   testInvalidMemberCallDiagnostic(index);
@@ -153,6 +158,7 @@ async function main(): Promise<void> {
   testCaseEnumLabelDefinitionResolves();
   testScopeAwareRename(index);
   testGlobalVariableReferences(index);
+  testNamespacedFunctionReferences();
   testBlockScopedShadowRename(index);
   testHoverLocalVariableAndWorkspaceFunctionDocs(index);
   testHoverOnMemberInReturnExpression(index);
@@ -165,6 +171,7 @@ async function main(): Promise<void> {
   testQualifiedSignatureHelp(index);
   testSignatureHelpSelectsOverload(index);
   testInlayHints(index);
+  testNamespacedWorkspaceInlayHints(index);
   testInlayHintsGlobalAutoStartnewType(index);
   testCompletionShortcuts(index);
   testInlineValueCategoryToggles();
@@ -181,6 +188,7 @@ async function main(): Promise<void> {
   testColorProvider();
   testConstructorAndDestructorParsing();
   testDocumentSymbols();
+  testNamespaceDocumentSymbols();
   await testImportValidationFolderOnlyWarning();
   await testImportValidationFolderJunctionWarningAndLookup();
   await testImportValidationFolderAndOpNoSourceWarning();
@@ -390,6 +398,61 @@ function testCoreAccessorPropertiesFromCoreMethods(
         diagnostic.range.start.line === 1
     ),
     "Expected get_/set_ accessors from core-class metadata to surface as property members for typing."
+  );
+}
+
+function testCoreMethodDefaultArgumentsPreserved(): void {
+  const index = createCompletionIndex();
+  registerNamespacePath(index, "XML");
+  registerCoreClassTypeInfo(index, "XML::Node", {
+    methods: [
+      {
+        name: "Attribute",
+        returntypedecl: "string",
+        args: [
+          { typedecl: "string", name: "name" },
+          { typedecl: "string", name: "def", default: "\"\"" }
+        ]
+      }
+    ]
+  });
+
+  const memberItems = collectMemberCompletionItems(index, "XML::Node", "Attr");
+  const attributeItem = memberItems.find((item) => item.label === "Attribute");
+  assert.ok(attributeItem, "Expected XML::Node.Attribute member completion.");
+  assert.ok(
+    attributeItem?.detail?.includes('def = ""'),
+    "Expected core-class member completions to preserve default argument text."
+  );
+
+  const source = [
+    "void Main() {",
+    "  XML::Node node;",
+    '  node.Attribute("bronze");',
+    "}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///core-method-default-args.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+  const diagnostics = getSemanticDiagnostics(
+    document,
+    analysis,
+    [analysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 40
+    }
+  );
+
+  assert.ok(
+    !diagnostics.some((diagnostic) => diagnostic.code === "arity-mismatch"),
+    "Expected core-class default arguments to allow omitting trailing optional parameters."
   );
 }
 
@@ -1713,6 +1776,49 @@ function testOverloadResolutionPrefersExactMatch(
   );
 }
 
+function testNamespacedOverloadDefaultsDoNotCauseAmbiguousUnqualifiedCall(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  const source = [
+    "namespace A {",
+    '  void _DiagStep(const string &in step, const string &in fn = "A", bool force = false) {}',
+    "}",
+    "namespace B {",
+    '  void _DiagStep(const string &in step, const string &in fn = "B", bool force = false) {}',
+    "}",
+    "",
+    "namespace A {",
+    "  void Main() {",
+    '    _DiagStep("x", "Main");',
+    '    _DiagStep("x", "Main", true);',
+    "  }",
+    "}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///namespaced-overload-defaults-unqualified-call.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+  const diagnostics = getSemanticDiagnostics(
+    document,
+    analysis,
+    [analysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 60
+    }
+  );
+
+  assert.ok(
+    !diagnostics.some((diagnostic) => diagnostic.code === "call-argument-type-mismatch"),
+    "Expected unqualified calls inside namespace A to resolve A::_DiagStep without ambiguity from B::_DiagStep."
+  );
+}
+
 function testTemplateSignatureInference(
   index: ReturnType<typeof createCompletionIndex>
 ): void {
@@ -2150,6 +2256,107 @@ function testIndexedOperatorTypeInference(
     genericIndexedType,
     "int",
     "Expected array<T> index access to infer template element type."
+  );
+}
+
+function testIndexedReceiverMemberResolution(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  const lines = [
+    "class Node {",
+    "  int parentIx;",
+    "}",
+    "class Selector {",
+    "  uint current;",
+    "}",
+    "class Doc {",
+    "  array<Node@> nodes;",
+    "}",
+    "void Main() {",
+    "  Doc doc;",
+    "  Selector selector;",
+    "  int root = doc.nodes[selector.current].parentIx;",
+    "}"
+  ];
+  const source = lines.join("\n");
+  const document = TextDocument.create(
+    "file:///indexed-receiver-member-resolution.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+  const allAnalyses = [analysis];
+  const workspaceTypeCatalog = collectWorkspaceTypeCatalog(allAnalyses);
+  const effectiveIndex = createWorkspaceTypeAwareIndex(
+    index,
+    workspaceTypeCatalog.byFullName
+  );
+  const scopedReturnTypes = collectFunctionReturnTypes(allAnalyses);
+
+  const expressionTypeContext = getTypeResolutionContextAtPosition(
+    document,
+    analysis,
+    12,
+    lines[12].indexOf("parentIx"),
+    allAnalyses,
+    scopedReturnTypes,
+    effectiveIndex
+  );
+  const resolvedType = tryResolveExpressionTypeFullName(
+    effectiveIndex,
+    "doc.nodes[selector.current]",
+    expressionTypeContext
+  );
+  assert.strictEqual(
+    resolvedType,
+    "Node",
+    "Expected indexed member receivers to keep element typing through bracket expressions."
+  );
+
+  const diagnostics = getSemanticDiagnostics(
+    document,
+    analysis,
+    allAnalyses,
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      maxSymbolDiagnostics: 40
+    }
+  );
+  assert.ok(
+    !diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "unknown-member" &&
+        diagnostic.range.start.line === 12
+    ),
+    "Expected direct indexed receiver member access to avoid false unknown-member diagnostics."
+  );
+
+  const parentIxCharacter = lines[12].indexOf("parentIx") + 2;
+  const hoverTypeContext = getTypeResolutionContextAtPosition(
+    document,
+    analysis,
+    12,
+    parentIxCharacter,
+    allAnalyses,
+    scopedReturnTypes,
+    effectiveIndex
+  );
+  const hover = getHoverAtPosition(
+    document,
+    12,
+    parentIxCharacter,
+    effectiveIndex,
+    hoverTypeContext,
+    analysis,
+    allAnalyses
+  );
+  assert.ok(hover, "Expected hover details for indexed receiver member access.");
+  assert.ok(
+    hoverToText(hover).includes("int parentIx"),
+    "Expected hover on indexed receiver member to include the resolved property signature."
   );
 }
 
@@ -2669,6 +2876,83 @@ function testGlobalVariableReferences(
   assert.ok(
     references.filter((location) => location.uri === mainDocument.uri).length === 2,
     "Expected both reads/writes in the current document to be included for global variable references."
+  );
+}
+
+function testNamespacedFunctionReferences(): void {
+  const declarationDocument = TextDocument.create(
+    "file:///namespaced-function-declaration.as",
+    "openplanet-angelscript",
+    1,
+    [
+      "namespace UiNav {",
+      "namespace Trace {",
+      "  void Ev() {}",
+      "}",
+      "}"
+    ].join("\n")
+  );
+  const usageDocument = TextDocument.create(
+    "file:///namespaced-function-usage.as",
+    "openplanet-angelscript",
+    1,
+    ["void Main() {", "  UiNav::Trace::Ev();", "}"].join("\n")
+  );
+
+  const declarationAnalysis = analyzeDocument(declarationDocument);
+  const usageAnalysis = analyzeDocument(usageDocument);
+  const allAnalyses = [declarationAnalysis, usageAnalysis];
+
+  const referencesWithDeclaration = getReferencesAtPosition(
+    declarationDocument,
+    declarationAnalysis,
+    allAnalyses,
+    2,
+    7,
+    true
+  );
+  assert.strictEqual(
+    referencesWithDeclaration.length,
+    2,
+    "Expected namespaced function references to include declaration and qualified call."
+  );
+  assert.ok(
+    referencesWithDeclaration.some(
+      (location) =>
+        location.uri === usageDocument.uri && location.range.start.line === 1
+    ),
+    "Expected namespaced function references to include qualified call outside the namespace."
+  );
+
+  const referencesWithoutDeclaration = getReferencesAtPosition(
+    declarationDocument,
+    declarationAnalysis,
+    allAnalyses,
+    2,
+    7,
+    false
+  );
+  assert.strictEqual(
+    referencesWithoutDeclaration.length,
+    1,
+    "Expected code-lens reference count for namespaced function to include qualified call sites."
+  );
+
+  const definition = getDeclarationAtPosition(
+    usageDocument,
+    usageAnalysis,
+    allAnalyses,
+    1,
+    16
+  );
+  assert.ok(
+    definition,
+    "Expected go-to-definition on qualified namespaced call to resolve to declaration."
+  );
+  assert.strictEqual(
+    definition?.uri,
+    declarationDocument.uri,
+    "Expected qualified namespaced call to resolve to function declaration document."
   );
 }
 
@@ -3329,6 +3613,71 @@ function testInlayHints(index: ReturnType<typeof createCompletionIndex>): void {
   );
 }
 
+function testNamespacedWorkspaceInlayHints(
+  index: ReturnType<typeof createCompletionIndex>
+): void {
+  const declarationDocument = TextDocument.create(
+    "file:///inlay-hints-uinav-declaration.as",
+    "openplanet-angelscript",
+    1,
+    [
+      "namespace UiNav {",
+      "namespace Builder {",
+      "  bool RefreshLiveLayerBoundsOverlay(bool rescan = false, bool quiet = false) {",
+      "    return false;",
+      "  }",
+      "}",
+      "}"
+    ].join("\n")
+  );
+  const usageDocument = TextDocument.create(
+    "file:///inlay-hints-uinav-usage.as",
+    "openplanet-angelscript",
+    1,
+    [
+      "void Main() {",
+      "  UiNav::Builder::RefreshLiveLayerBoundsOverlay(false, true);",
+      "}"
+    ].join("\n")
+  );
+
+  const declarationAnalysis = analyzeDocument(declarationDocument);
+  const usageAnalysis = analyzeDocument(usageDocument);
+  const workspaceFunctionDeclarationsByName = new Map<
+    string,
+    Array<{ analysis: DocumentAnalysis; declaration: FunctionDeclaration }>
+  >();
+
+  for (const analysis of [declarationAnalysis, usageAnalysis]) {
+    for (const declaration of analysis.functions) {
+      const entries = workspaceFunctionDeclarationsByName.get(declaration.name) ?? [];
+      entries.push({ analysis, declaration });
+      workspaceFunctionDeclarationsByName.set(declaration.name, entries);
+    }
+  }
+
+  const hints = getInlayHints(
+    usageDocument,
+    usageAnalysis,
+    index,
+    {
+      start: { line: 0, character: 0 },
+      end: { line: 2, character: 0 }
+    },
+    undefined,
+    workspaceFunctionDeclarationsByName
+  );
+
+  assert.ok(
+    hints.some((hint) => String(hint.label).includes("rescan:")),
+    "Expected namespaced workspace inlay hints to include the first UiNav boolean parameter."
+  );
+  assert.ok(
+    hints.some((hint) => String(hint.label).includes("quiet:")),
+    "Expected namespaced workspace inlay hints to include the second UiNav boolean parameter."
+  );
+}
+
 function testInlayHintsGlobalAutoStartnewType(
   index: ReturnType<typeof createCompletionIndex>
 ): void {
@@ -3793,6 +4142,44 @@ function testDocumentSymbols(): void {
   );
   assert.strictEqual(analysis.documentSymbols[0].name, "A");
   assert.strictEqual(analysis.documentSymbols[1].name, "B");
+}
+
+function testNamespaceDocumentSymbols(): void {
+  const source = [
+    "namespace Namespace1 {",
+    "  namespace Namespace2 {",
+    "    void Fn() { }",
+    "  }",
+    "}",
+    "void GlobalFn() { }"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///symbols-namespaces.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+
+  const namespace1 = analysis.documentSymbols.find(
+    (symbol) => symbol.kind === SymbolKind.Namespace && symbol.name === "Namespace1"
+  );
+  assert.ok(namespace1, "Expected Namespace1 namespace symbol in document outline.");
+
+  const namespace2 = namespace1?.children?.find(
+    (symbol) => symbol.kind === SymbolKind.Namespace && symbol.name === "Namespace2"
+  );
+  assert.ok(namespace2, "Expected Namespace2 namespace symbol nested under Namespace1.");
+
+  const nestedFunction = namespace2?.children?.find(
+    (symbol) => symbol.kind === SymbolKind.Function && symbol.name === "Fn"
+  );
+  assert.ok(nestedFunction, "Expected Fn function symbol nested under namespaces.");
+
+  const globalFunction = analysis.documentSymbols.find(
+    (symbol) => symbol.kind === SymbolKind.Function && symbol.name === "GlobalFn"
+  );
+  assert.ok(globalFunction, "Expected GlobalFn function symbol at document root.");
 }
 
 function testGrammarCallableDeclarations(): void {

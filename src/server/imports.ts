@@ -231,6 +231,10 @@ async function resolvePluginRoots(
   symbolsBaseUserFolderPath: string
 ): Promise<string[]> {
   const candidates = new Set<string>();
+  const baseUserFolderPath = getBaseUserFolderPath(symbolsBaseUserFolderPath);
+  candidates.add(
+    path.normalize(path.join(baseUserFolderPath, "OpenplanetNext", "Plugins"))
+  );
 
   if (configuredPluginRoots.length > 0) {
     for (const configuredRoot of configuredPluginRoots) {
@@ -244,13 +248,8 @@ async function resolvePluginRoots(
       }
     }
   } else {
-    const baseUserFolderPath = getBaseUserFolderPath(symbolsBaseUserFolderPath);
-    candidates.add(
-      path.normalize(path.join(baseUserFolderPath, "OpenplanetNext", "Plugins"))
-    );
-
     for (const workspaceRoot of workspaceRoots) {
-      candidates.add(path.normalize(path.join(workspaceRoot, "plugins")));
+      addWorkspacePluginRootCandidates(candidates, workspaceRoot);
     }
   }
 
@@ -279,7 +278,8 @@ async function findImportSourceMatches(
   }
 
   const normalizedModule = moduleName.toLowerCase();
-  const matches: ImportSourceMatch[] = [];
+  const exactMatches: ImportSourceMatch[] = [];
+  const fuzzyMatches: ImportSourceMatch[] = [];
 
   for (const pluginRoot of pluginRoots) {
     let entries: Dirent[];
@@ -292,12 +292,20 @@ async function findImportSourceMatches(
     for (const entry of entries) {
       const fullPath = path.join(pluginRoot, entry.name);
       const entryKind = await resolveDirentKind(pluginRoot, entry);
-      if (entryKind === "directory" && entry.name.toLowerCase() === normalizedModule) {
-        matches.push({
-          kind: "folder",
-          root: pluginRoot,
-          path: fullPath
-        });
+      if (entryKind === "directory") {
+        if (entry.name.toLowerCase() === normalizedModule) {
+          exactMatches.push({
+            kind: "folder",
+            root: pluginRoot,
+            path: fullPath
+          });
+        } else if (moduleNameMatchesEntryName(moduleName, entry.name)) {
+          fuzzyMatches.push({
+            kind: "folder",
+            root: pluginRoot,
+            path: fullPath
+          });
+        }
         continue;
       }
 
@@ -310,17 +318,23 @@ async function findImportSourceMatches(
       }
 
       const baseName = entry.name.slice(0, -3);
-      if (baseName.toLowerCase() !== normalizedModule) {
-        continue;
+      if (baseName.toLowerCase() === normalizedModule) {
+        exactMatches.push({
+          kind: "op",
+          root: pluginRoot,
+          path: fullPath
+        });
+      } else if (moduleNameMatchesEntryName(moduleName, baseName)) {
+        fuzzyMatches.push({
+          kind: "op",
+          root: pluginRoot,
+          path: fullPath
+        });
       }
-
-      matches.push({
-        kind: "op",
-        root: pluginRoot,
-        path: fullPath
-      });
     }
   }
+
+  const matches = exactMatches.length > 0 ? exactMatches : fuzzyMatches;
 
   sourceMatchCache.set(cacheKey, {
     value: matches,
@@ -328,6 +342,52 @@ async function findImportSourceMatches(
   });
 
   return matches;
+}
+
+function addWorkspacePluginRootCandidates(
+  candidates: Set<string>,
+  workspaceRoot: string
+): void {
+  const root = path.normalize(workspaceRoot);
+  const parent = path.dirname(root);
+
+  candidates.add(path.normalize(path.join(root, "plugins")));
+  candidates.add(path.normalize(path.join(root, "deps")));
+  candidates.add(root);
+
+  if (parent !== root) {
+    candidates.add(parent);
+    candidates.add(path.normalize(path.join(parent, "plugins")));
+    candidates.add(path.normalize(path.join(parent, "deps")));
+  }
+
+  const rootBase = path.basename(root).toLowerCase();
+  if (parent !== root && (rootBase === "plugins" || rootBase === "deps")) {
+    candidates.add(parent);
+    candidates.add(path.normalize(path.join(parent, "plugins")));
+    candidates.add(path.normalize(path.join(parent, "deps")));
+  }
+}
+
+function moduleNameMatchesEntryName(moduleName: string, entryName: string): boolean {
+  const normalizedModule = normalizeModuleLookup(moduleName);
+  const normalizedEntry = normalizeModuleLookup(entryName);
+  if (!normalizedModule || !normalizedEntry) {
+    return false;
+  }
+  if (normalizedEntry === normalizedModule) {
+    return true;
+  }
+
+  return normalizedModule.length >= 4 && normalizedEntry.endsWith(normalizedModule);
+}
+
+function normalizeModuleLookup(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/\.op$/i, "")
+    .replace(/[^a-z0-9]+/g, "");
 }
 
 async function resolveDirentKind(
@@ -423,12 +483,19 @@ async function getOpFunctionIndex(opFilePath: string): Promise<FunctionIndex> {
 async function collectFolderAngelScriptFiles(folderPath: string): Promise<string[]> {
   const files: string[] = [];
   const stack = [folderPath];
+  const visitedDirectories = new Set<string>();
 
   while (stack.length > 0) {
     const current = stack.pop();
     if (!current) {
       continue;
     }
+
+    const currentDirectoryKey = await resolveDirectoryTraversalKey(current);
+    if (visitedDirectories.has(currentDirectoryKey)) {
+      continue;
+    }
+    visitedDirectories.add(currentDirectoryKey);
 
     let entries: Dirent[];
     try {
@@ -439,12 +506,13 @@ async function collectFolderAngelScriptFiles(folderPath: string): Promise<string
 
     for (const entry of entries) {
       const fullPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
+      const entryKind = await resolveDirentKind(current, entry);
+      if (entryKind === "directory") {
         stack.push(fullPath);
         continue;
       }
 
-      if (!entry.isFile()) {
+      if (entryKind !== "file") {
         continue;
       }
 
@@ -457,6 +525,14 @@ async function collectFolderAngelScriptFiles(folderPath: string): Promise<string
   }
 
   return files;
+}
+
+async function resolveDirectoryTraversalKey(directoryPath: string): Promise<string> {
+  try {
+    return path.normalize(await fs.realpath(directoryPath)).toLowerCase();
+  } catch {
+    return path.normalize(path.resolve(directoryPath)).toLowerCase();
+  }
 }
 
 function extractZipAngelScriptEntries(buffer: Buffer): Array<{ name: string; text: string }> {

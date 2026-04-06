@@ -10,6 +10,16 @@ import type {
 } from "./types";
 import { readString, toObjectArray } from "./util";
 
+const indexedContainerTypeNames = new Set<string>([
+  "array",
+  "mwsarray",
+  "mwstridedarray",
+  "mwfastarray",
+  "mwfastbuffer",
+  "mwnodpool",
+  "mwrefbuffer"
+]);
+
 export function getDotCompletionContext(
   document: TextDocument,
   lineNumber: number,
@@ -39,7 +49,9 @@ export function getDotCompletionContext(
 }
 
 export function findLastDotOutsideParens(text: string): number {
-  let depth = 0;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let braceDepth = 0;
   let inSingleQuote = false;
   let inDoubleQuote = false;
   let escapeNext = false;
@@ -73,16 +85,36 @@ export function findLastDotOutsideParens(text: string): number {
     }
 
     if (ch === "(") {
-      depth += 1;
+      parenDepth += 1;
       continue;
     }
 
     if (ch === ")") {
-      depth = Math.max(0, depth - 1);
+      parenDepth = Math.max(0, parenDepth - 1);
       continue;
     }
 
-    if (ch === "." && depth === 0) {
+    if (ch === "[") {
+      bracketDepth += 1;
+      continue;
+    }
+
+    if (ch === "]") {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+      continue;
+    }
+
+    if (ch === "{") {
+      braceDepth += 1;
+      continue;
+    }
+
+    if (ch === "}") {
+      braceDepth = Math.max(0, braceDepth - 1);
+      continue;
+    }
+
+    if (ch === "." && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
       lastDot = i;
     }
   }
@@ -109,12 +141,43 @@ export function tryResolveExpressionTypeFullName(
   expressionText: string,
   context?: TypeResolutionContext
 ): string | undefined {
-  const segments = splitByDotsOutsideParens(expressionText);
+  const resolvedType = tryResolveExpressionType(index, expressionText, context);
+  if (!resolvedType) {
+    return undefined;
+  }
+
+  return tryResolveTypeFullNameFromTypeString(
+    index,
+    resolvedType.typeText,
+    resolvedType.preferredNamespace
+  );
+}
+
+interface ResolvedExpressionType {
+  typeText: string;
+  preferredNamespace?: string;
+}
+
+function tryResolveExpressionType(
+  index: CompletionIndex,
+  expressionText: string,
+  context?: TypeResolutionContext
+): ResolvedExpressionType | undefined {
+  const trimmedExpression = stripOuterParentheses(expressionText.trim());
+  if (!trimmedExpression) {
+    return undefined;
+  }
+
+  if (trimmedExpression !== expressionText.trim()) {
+    return tryResolveExpressionType(index, trimmedExpression, context);
+  }
+
+  const segments = splitByDotsOutsideParens(trimmedExpression);
   if (segments.length === 0) {
     return undefined;
   }
 
-  let currentType = tryResolveBaseExpressionTypeFullName(
+  let currentType = tryResolveBaseExpressionType(
     index,
     segments[0],
     context
@@ -124,39 +187,12 @@ export function tryResolveExpressionTypeFullName(
   }
 
   for (let i = 1; i < segments.length; i += 1) {
-    const segment = segments[i];
-    const access = parseMemberAccessSegment(segment);
-    if (!access) {
+    const nextType = tryResolveMemberAccessType(index, currentType, segments[i]);
+    if (!nextType) {
       return undefined;
     }
 
-    const member = findResolvedMember(index, currentType, access.name);
-    if (!member) {
-      return undefined;
-    }
-
-    const nextTypeString =
-      access.isCall && member.kind === "method"
-        ? member.returnType
-        : !access.isCall && member.kind === "property"
-          ? member.type
-          : undefined;
-
-    if (!nextTypeString) {
-      return undefined;
-    }
-
-    const preferredNamespace = index.typeInfoByFullName.get(currentType)?.namespace;
-    const nextTypeFullName = tryResolveTypeFullNameFromTypeString(
-      index,
-      nextTypeString,
-      preferredNamespace
-    );
-    if (!nextTypeFullName) {
-      return undefined;
-    }
-
-    currentType = nextTypeFullName;
+    currentType = nextType;
   }
 
   return currentType;
@@ -384,12 +420,15 @@ function formatCoreArgs(value: unknown): string {
     }
 
     const argName = readString(argRecord.name);
+    const defaultValue = readString(argRecord.default);
     if (argName) {
-      parts.push(`${typeDecl} ${argName}`);
+      parts.push(
+        defaultValue ? `${typeDecl} ${argName} = ${defaultValue}` : `${typeDecl} ${argName}`
+      );
       continue;
     }
 
-    parts.push(typeDecl);
+    parts.push(defaultValue ? `${typeDecl} = ${defaultValue}` : typeDecl);
   }
 
   return parts.join(", ");
@@ -660,7 +699,9 @@ function extractFirstParameterType(argsText: string): string | undefined {
 
 function splitByDotsOutsideParens(text: string): string[] {
   const parts: string[] = [];
-  let depth = 0;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let braceDepth = 0;
   let inSingleQuote = false;
   let inDoubleQuote = false;
   let escapeNext = false;
@@ -694,16 +735,36 @@ function splitByDotsOutsideParens(text: string): string[] {
     }
 
     if (ch === "(") {
-      depth += 1;
+      parenDepth += 1;
       continue;
     }
 
     if (ch === ")") {
-      depth = Math.max(0, depth - 1);
+      parenDepth = Math.max(0, parenDepth - 1);
       continue;
     }
 
-    if (ch === "." && depth === 0) {
+    if (ch === "[") {
+      bracketDepth += 1;
+      continue;
+    }
+
+    if (ch === "]") {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+      continue;
+    }
+
+    if (ch === "{") {
+      braceDepth += 1;
+      continue;
+    }
+
+    if (ch === "}") {
+      braceDepth = Math.max(0, braceDepth - 1);
+      continue;
+    }
+
+    if (ch === "." && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
       const part = text.slice(start, i).trim();
       if (part.length > 0) {
         parts.push(part);
@@ -720,70 +781,481 @@ function splitByDotsOutsideParens(text: string): string[] {
   return parts;
 }
 
-function tryResolveBaseExpressionTypeFullName(
+function tryResolveBaseExpressionType(
   index: CompletionIndex,
   part: string,
   context?: TypeResolutionContext
-): string | undefined {
-  const trimmed = part.trim();
+): ResolvedExpressionType | undefined {
+  const trimmed = stripOuterParentheses(part.trim());
   if (!trimmed) {
     return undefined;
   }
 
   const castMatch =
-    /^cast\s*<\s*([^>]+?)\s*>\s*\(([\s\S]*)\)\s*$/.exec(trimmed);
+    /^cast\s*<\s*([^>]+?)\s*>\s*\(([\s\S]*)\)\s*([\s\S]*)$/.exec(trimmed);
   if (castMatch) {
-    return tryResolveTypeFullNameFromTypeString(index, castMatch[1]);
+    return applyTrailingIndexes(index, {
+      typeText: castMatch[1].trim()
+    }, castMatch[3] ?? "");
   }
 
-  const callMatch = /^([A-Za-z_][A-Za-z0-9_]*)\s*\([\s\S]*\)\s*$/.exec(trimmed);
-  if (callMatch) {
-    const functionName = callMatch[1];
-    const localReturnType = context?.localFunctionReturnTypes.get(functionName);
-    const returnType =
-      localReturnType ?? index.coreFunctionReturnTypes.get(functionName);
-    if (!returnType) {
-      if (functionName === "GetApp") {
-        return tryResolveTypeFullNameFromTypeString(index, "CGameCtnApp@");
-      }
+  const headMatch = /^([A-Za-z_][A-Za-z0-9_:]*)/.exec(trimmed);
+  if (!headMatch) {
+    return undefined;
+  }
 
+  const head = headMatch[1];
+  let cursor = head.length;
+  cursor = skipWhitespace(trimmed, cursor);
+
+  let resolved: ResolvedExpressionType | undefined;
+  if (trimmed[cursor] === "(") {
+    const closeParen = findMatchingDelimiter(trimmed, cursor, "(", ")");
+    if (closeParen < 0) {
       return undefined;
     }
+    cursor = closeParen + 1;
 
-    return tryResolveTypeFullNameFromTypeString(index, returnType);
-  }
-
-  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed)) {
-    const localType = context?.localVariableTypes.get(trimmed);
+    const localReturnType = context?.localFunctionReturnTypes.get(head);
+    const returnType =
+      localReturnType ?? index.coreFunctionReturnTypes.get(head);
+    if (!returnType) {
+      if (head === "GetApp") {
+        resolved = {
+          typeText: "CGameCtnApp@"
+        };
+      } else {
+        return undefined;
+      }
+    } else {
+      resolved = {
+        typeText: returnType
+      };
+    }
+  } else {
+    const localType = context?.localVariableTypes.get(head);
     if (!localType) {
       return undefined;
     }
 
-    return tryResolveTypeFullNameFromTypeString(index, localType);
+    resolved = {
+      typeText: localType
+    };
   }
 
-  return undefined;
+  if (!resolved) {
+    return undefined;
+  }
+
+  const preferredNamespace = getTypeNamespace(index, resolved.typeText);
+  return applyTrailingIndexes(index, {
+    ...resolved,
+    preferredNamespace
+  }, trimmed.slice(cursor));
 }
 
-function parseMemberAccessSegment(
+function tryResolveMemberAccessType(
+  index: CompletionIndex,
+  receiverType: ResolvedExpressionType,
   segment: string
-): { name: string; isCall: boolean } | undefined {
+): ResolvedExpressionType | undefined {
   const trimmed = segment.trim();
   if (!trimmed) {
     return undefined;
   }
 
-  const callMatch = /^([A-Za-z_][A-Za-z0-9_]*)\s*\(/.exec(trimmed);
-  if (callMatch) {
-    return { name: callMatch[1], isCall: true };
+  const memberMatch = /^([A-Za-z_][A-Za-z0-9_]*)/.exec(trimmed);
+  if (!memberMatch) {
+    return undefined;
   }
 
-  const propMatch = /^([A-Za-z_][A-Za-z0-9_]*)/.exec(trimmed);
-  if (propMatch) {
-    return { name: propMatch[1], isCall: false };
+  const receiverTypeFullName = tryResolveTypeFullNameFromTypeString(
+    index,
+    receiverType.typeText,
+    receiverType.preferredNamespace
+  );
+  if (!receiverTypeFullName) {
+    return undefined;
   }
 
-  return undefined;
+  const memberName = memberMatch[1];
+  let cursor = memberName.length;
+  cursor = skipWhitespace(trimmed, cursor);
+
+  let isCall = false;
+  if (trimmed[cursor] === "(") {
+    const closeParen = findMatchingDelimiter(trimmed, cursor, "(", ")");
+    if (closeParen < 0) {
+      return undefined;
+    }
+    isCall = true;
+    cursor = closeParen + 1;
+  }
+
+  const member = findResolvedMember(index, receiverTypeFullName, memberName);
+  if (!member) {
+    return undefined;
+  }
+
+  const nextTypeText =
+    isCall && member.kind === "method"
+      ? member.returnType
+      : !isCall && member.kind === "property"
+        ? member.type
+        : undefined;
+  if (!nextTypeText) {
+    return undefined;
+  }
+
+  return applyTrailingIndexes(index, {
+    typeText: nextTypeText,
+    preferredNamespace: index.typeInfoByFullName.get(receiverTypeFullName)?.namespace
+  }, trimmed.slice(cursor));
+}
+
+function applyTrailingIndexes(
+  index: CompletionIndex,
+  resolvedType: ResolvedExpressionType,
+  trailingText: string
+): ResolvedExpressionType | undefined {
+  let cursor = 0;
+  let current = resolvedType;
+  while (true) {
+    cursor = skipWhitespace(trailingText, cursor);
+    if (cursor >= trailingText.length) {
+      return current;
+    }
+
+    if (trailingText[cursor] !== "[") {
+      return undefined;
+    }
+
+    const closeBracket = findMatchingDelimiter(trailingText, cursor, "[", "]");
+    if (closeBracket < 0) {
+      return undefined;
+    }
+
+    const indexedType = tryResolveIndexedExpressionType(index, current);
+    if (!indexedType) {
+      return undefined;
+    }
+
+    current = indexedType;
+    cursor = closeBracket + 1;
+  }
+}
+
+function tryResolveIndexedExpressionType(
+  index: CompletionIndex,
+  resolvedType: ResolvedExpressionType
+): ResolvedExpressionType | undefined {
+  const genericElementType = tryExtractIndexedContainerElementType(resolvedType.typeText);
+  if (genericElementType) {
+    return {
+      typeText: genericElementType,
+      preferredNamespace: resolvedType.preferredNamespace
+    };
+  }
+
+  const receiverTypeFullName = tryResolveTypeFullNameFromTypeString(
+    index,
+    resolvedType.typeText,
+    resolvedType.preferredNamespace
+  );
+  if (!receiverTypeFullName) {
+    return undefined;
+  }
+
+  const candidates = getResolvedMembersForType(index, receiverTypeFullName)
+    .filter(
+      (member) =>
+        member.kind === "method" &&
+        (member.name === "opIndex" || member.name === "opIndexConst") &&
+        typeof member.returnType === "string" &&
+        member.returnType.trim().length > 0
+    )
+    .map((member) => member.returnType?.trim() ?? "")
+    .filter((memberType): memberType is string => memberType.length > 0);
+  const uniqueCandidates = [...new Set(candidates)];
+  if (uniqueCandidates.length !== 1) {
+    return undefined;
+  }
+
+  return {
+    typeText: uniqueCandidates[0],
+    preferredNamespace: index.typeInfoByFullName.get(receiverTypeFullName)?.namespace
+  };
+}
+
+function tryExtractIndexedContainerElementType(typeText: string): string | undefined {
+  const normalized = normalizeTypeLookupText(typeText);
+  const genericStart = normalized.indexOf("<");
+  if (genericStart < 0) {
+    return undefined;
+  }
+
+  const genericEnd = findMatchingTypeGenericClose(normalized, genericStart);
+  if (genericEnd < 0) {
+    return undefined;
+  }
+
+  const baseName = normalized.slice(0, genericStart).trim();
+  const shortBaseName = (baseName.split("::").pop() ?? baseName).toLowerCase();
+  if (!indexedContainerTypeNames.has(shortBaseName)) {
+    return undefined;
+  }
+
+  const genericBody = normalized.slice(genericStart + 1, genericEnd).trim();
+  if (!genericBody) {
+    return undefined;
+  }
+
+  const genericArgs = splitTopLevelByComma(genericBody);
+  const firstArg = genericArgs[0]?.trim();
+  return firstArg && firstArg.length > 0 ? firstArg : undefined;
+}
+
+function normalizeTypeLookupText(typeText: string): string {
+  let normalized = typeText.trim();
+  while (
+    /^(const|shared|private|protected|final|override|external)\b/.test(normalized)
+  ) {
+    normalized = normalized
+      .replace(/^(const|shared|private|protected|final|override|external)\s+/, "")
+      .trim();
+  }
+
+  normalized = normalized
+    .replace(/\b(inout|in|out)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  normalized = normalizeArrayBracketShorthand(normalized);
+  return normalized.replace(/[@&]+$/g, "").trim();
+}
+
+function splitTopLevelByComma(text: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let angleDepth = 0;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let braceDepth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escapeNext = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (ch === "\\") {
+      escapeNext = true;
+      continue;
+    }
+
+    if (!inDoubleQuote && ch === "'") {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+
+    if (!inSingleQuote && ch === "\"") {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+
+    if (inSingleQuote || inDoubleQuote) {
+      continue;
+    }
+
+    if (ch === "<") {
+      angleDepth += 1;
+      continue;
+    }
+
+    if (ch === ">") {
+      angleDepth = Math.max(0, angleDepth - 1);
+      continue;
+    }
+
+    if (ch === "(") {
+      parenDepth += 1;
+      continue;
+    }
+
+    if (ch === ")") {
+      parenDepth = Math.max(0, parenDepth - 1);
+      continue;
+    }
+
+    if (ch === "[") {
+      bracketDepth += 1;
+      continue;
+    }
+
+    if (ch === "]") {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+      continue;
+    }
+
+    if (ch === "{") {
+      braceDepth += 1;
+      continue;
+    }
+
+    if (ch === "}") {
+      braceDepth = Math.max(0, braceDepth - 1);
+      continue;
+    }
+
+    if (
+      ch === "," &&
+      angleDepth === 0 &&
+      parenDepth === 0 &&
+      bracketDepth === 0 &&
+      braceDepth === 0
+    ) {
+      parts.push(text.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+
+  const lastPart = text.slice(start).trim();
+  if (lastPart.length > 0) {
+    parts.push(lastPart);
+  }
+
+  return parts;
+}
+
+function stripOuterParentheses(text: string): string {
+  let current = text.trim();
+  while (current.startsWith("(") && current.endsWith(")")) {
+    const closeParen = findMatchingDelimiter(current, 0, "(", ")");
+    if (closeParen !== current.length - 1) {
+      break;
+    }
+    current = current.slice(1, -1).trim();
+  }
+  return current;
+}
+
+function skipWhitespace(text: string, index: number): number {
+  let cursor = index;
+  while (cursor < text.length && /\s/.test(text[cursor])) {
+    cursor += 1;
+  }
+  return cursor;
+}
+
+function findMatchingDelimiter(
+  text: string,
+  startIndex: number,
+  openChar: "(" | "[" | "{",
+  closeChar: ")" | "]" | "}"
+): number {
+  if (text[startIndex] !== openChar) {
+    return -1;
+  }
+
+  const stack: string[] = [closeChar];
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escapeNext = false;
+
+  for (let i = startIndex + 1; i < text.length; i += 1) {
+    const ch = text[i];
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (ch === "\\") {
+      escapeNext = true;
+      continue;
+    }
+
+    if (!inDoubleQuote && ch === "'") {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+
+    if (!inSingleQuote && ch === "\"") {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+
+    if (inSingleQuote || inDoubleQuote) {
+      continue;
+    }
+
+    if (ch === "(") {
+      stack.push(")");
+      continue;
+    }
+
+    if (ch === "[") {
+      stack.push("]");
+      continue;
+    }
+
+    if (ch === "{") {
+      stack.push("}");
+      continue;
+    }
+
+    if (stack.length > 0 && ch === stack[stack.length - 1]) {
+      stack.pop();
+      if (stack.length === 0) {
+        return i;
+      }
+    }
+  }
+
+  return -1;
+}
+
+function findMatchingTypeGenericClose(text: string, startIndex: number): number {
+  if (text[startIndex] !== "<") {
+    return -1;
+  }
+
+  let depth = 1;
+  for (let i = startIndex + 1; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === "<") {
+      depth += 1;
+      continue;
+    }
+
+    if (ch === ">") {
+      depth -= 1;
+      if (depth === 0) {
+        return i;
+      }
+    }
+  }
+
+  return -1;
+}
+
+function getTypeNamespace(
+  index: CompletionIndex,
+  typeText: string,
+  preferredNamespace?: string
+): string | undefined {
+  const typeFullName = tryResolveTypeFullNameFromTypeString(
+    index,
+    typeText,
+    preferredNamespace
+  );
+  return typeFullName
+    ? index.typeInfoByFullName.get(typeFullName)?.namespace
+    : preferredNamespace;
 }
 
 export function tryResolveTypeFullNameFromTypeString(

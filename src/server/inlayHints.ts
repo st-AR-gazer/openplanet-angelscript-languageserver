@@ -284,6 +284,8 @@ function collectSignaturesForOccurrence(
   }
 
   const signatures = new Map<string, ParsedInlaySignature>();
+  const workspaceDeclarations =
+    workspaceFunctionDeclarationsByName?.get(callableName) ?? [];
   const addSignature = (label: string): void => {
     const parsed = parseInlaySignature(label);
     if (!parsed) {
@@ -296,7 +298,7 @@ function collectSignaturesForOccurrence(
   };
 
   if (qualifier === "none") {
-    for (const declaration of workspaceFunctionDeclarationsByName?.get(callableName) ?? []) {
+    for (const declaration of workspaceDeclarations) {
       addSignature(
         formatFunctionSignatureLabel(
           declaration.declaration.returnType,
@@ -319,6 +321,23 @@ function collectSignaturesForOccurrence(
     );
     if (!qualifiedName) {
       return [];
+    }
+
+    for (const declaration of workspaceDeclarations) {
+      const declarationQualifiedName = declaration.declaration.namespacePath
+        ? `${declaration.declaration.namespacePath}::${declaration.declaration.name}`
+        : declaration.declaration.name;
+      if (declarationQualifiedName !== qualifiedName) {
+        continue;
+      }
+
+      addSignature(
+        formatFunctionSignatureLabel(
+          declaration.declaration.returnType,
+          declaration.declaration.name,
+          declaration.declaration.argsText
+        )
+      );
     }
 
     for (const signature of completionIndex.coreFunctionSignaturesByQualifiedName.get(
