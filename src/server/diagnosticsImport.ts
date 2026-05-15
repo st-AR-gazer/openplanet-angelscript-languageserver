@@ -38,6 +38,7 @@ export function collectDuplicateImportDeclarationDiagnostics(
       declaration.argsText
     );
     const signatureKey = [
+      declaration.namespacePath.toLowerCase(),
       declaration.functionName.toLowerCase(),
       normalizedReturnType,
       normalizedParameterTypes,

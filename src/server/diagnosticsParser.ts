@@ -36,8 +36,99 @@ export function collectParserSyntaxDiagnostics(
   return [
     ...collectUnterminatedLiteralDiagnostics(document, source, codes),
     ...collectDelimiterDiagnostics(document, analysis.maskedText, source, codes),
+    ...collectDanglingMemberAccessDiagnostics(document, analysis.maskedText, source, codes),
     ...collectGrammarDiagnostics(document, analysis, parserSettings, source, codes)
   ];
+}
+
+function collectDanglingMemberAccessDiagnostics(
+  document: TextDocument,
+  maskedText: string,
+  source: string,
+  codes: ParserDiagnosticCodes
+): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+
+  for (let i = 0; i < maskedText.length; i += 1) {
+    if (maskedText[i] !== ".") {
+      continue;
+    }
+
+    if (isDecimalPointInNumberLiteral(maskedText, i)) {
+      continue;
+    }
+
+    const previousIndex = findPreviousNonWhitespace(maskedText, i - 1);
+    const nextIndex = findNextNonWhitespace(maskedText, i + 1);
+    if (previousIndex < 0) {
+      continue;
+    }
+
+    if (maskedText[previousIndex] === "." || maskedText[nextIndex] === ".") {
+      continue;
+    }
+
+    if (!canEndMemberAccessReceiver(maskedText, previousIndex)) {
+      continue;
+    }
+
+    if (nextIndex >= 0 && isIdentifierStart(maskedText[nextIndex])) {
+      continue;
+    }
+
+    diagnostics.push({
+      severity: DiagnosticSeverity.Error,
+      range: offsetToSingleCharRange(document, i),
+      message: 'Expected member name after ".".',
+      source,
+      code: codes.syntaxUnparsableStatementCode
+    });
+  }
+
+  return diagnostics;
+}
+
+function isDecimalPointInNumberLiteral(text: string, dotIndex: number): boolean {
+  return (
+    dotIndex > 0 &&
+    dotIndex + 1 < text.length &&
+    /[0-9]/.test(text[dotIndex - 1]) &&
+    /[0-9]/.test(text[dotIndex + 1])
+  );
+}
+
+function findPreviousNonWhitespace(text: string, startIndex: number): number {
+  for (let i = startIndex; i >= 0; i -= 1) {
+    if (!/\s/.test(text[i])) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function findNextNonWhitespace(text: string, startIndex: number): number {
+  for (let i = startIndex; i < text.length; i += 1) {
+    if (!/\s/.test(text[i])) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function canEndMemberAccessReceiver(text: string, index: number): boolean {
+  const ch = text[index];
+  if (/[A-Za-z_)\]]/.test(ch)) {
+    return true;
+  }
+  if (!/[0-9]/.test(ch)) {
+    return false;
+  }
+  const previous = index > 0 ? text[index - 1] : "";
+  return /[A-Za-z0-9_]/.test(previous);
+}
+
+function isIdentifierStart(ch: string): boolean {
+  return /[A-Za-z_]/.test(ch);
 }
 
 function collectDelimiterDiagnostics(

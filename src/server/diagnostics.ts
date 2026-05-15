@@ -3,12 +3,14 @@ import {
   CodeActionKind,
   Diagnostic,
   DiagnosticSeverity,
+  CompletionItemKind,
   TextEdit,
   WorkspaceEdit
 } from "vscode-languageserver/node";
 import type { TextDocument } from "vscode-languageserver-textdocument";
 import { URI } from "vscode-uri";
 import {
+  collectVisibleUsingNamespacePathsAtOffset,
   collectFunctionReturnTypes,
   DocumentAnalysis,
   getTypeResolutionContextAtPosition,
@@ -24,6 +26,7 @@ import {
 import {
   findResolvedMember,
   getResolvedMembersForType,
+  registerSemanticTypeInfo,
   tryResolveExpressionTypeFullName,
   tryResolveTypeFullNameFromTypeString
 } from "./members";
@@ -35,6 +38,7 @@ import {
   type ExpressionFunctionSources,
   type ExpressionInferenceContext
 } from "./compilerPipeline";
+import { addSymbol } from "./completions";
 import type {
   CompletionIndex,
   DiagnosticSettings,
@@ -57,6 +61,7 @@ import {
   collectDefaultArgumentOrderingDiagnostics as collectDefaultArgumentOrderingDiagnosticsFromModule,
   collectUnknownTypeDiagnostics as collectUnknownTypeDiagnosticsFromModule
 } from "./diagnosticsType";
+import { filterDiagnosticsForInactivePreprocessorBranches } from "./preprocessor";
 
 const caseMismatchCode = "case-mismatch-symbol";
 const unknownSymbolCode = "unknown-symbol";
@@ -349,7 +354,14 @@ export function getSemanticDiagnostics(
         continue;
       }
 
-      if (knownCallables.has(occurrence.name)) {
+      const visibleCallableSignatures = collectCallableSignaturesForOccurrence(
+        document,
+        analysis,
+        allAnalyses,
+        effectiveIndex,
+        occurrence
+      );
+      if (visibleCallableSignatures.length > 0) {
         const arityMismatch = buildArityMismatchDiagnostic(
           document,
           analysis,
@@ -364,7 +376,10 @@ export function getSemanticDiagnostics(
       }
 
       const normalizedName = occurrence.name.toLowerCase();
-      const caseCandidates = knownCallablesLower.get(normalizedName) ?? [];
+      const caseCandidates = getCaseMismatchCandidates(
+        occurrence.name,
+        knownCallablesLower.get(normalizedName) ?? []
+      );
       if (settings.enableCaseMismatch && caseCandidates.length > 0) {
         diagnostics.push(withDiagnosticStage({
           severity: DiagnosticSeverity.Error,
@@ -406,18 +421,18 @@ export function getSemanticDiagnostics(
       continue;
     }
 
-    if (isNamespacePrefix(analysis.text, occurrence.end)) {
-      if (
-        occurrence.qualifier === "none" &&
-        isKnownNamespacePath(
-          occurrence.name,
-          effectiveIndex,
-          allAnalyses,
-          knownTypeNames
-        )
-      ) {
-        continue;
-      }
+    if (
+      isKnownNamespacePrefixOccurrence(
+        document,
+        analysis,
+        occurrence,
+        effectiveIndex,
+        allAnalyses,
+        knownTypeNames,
+        lineTextCache
+      )
+    ) {
+      continue;
     }
 
     if (isInsideImportParameterDeclaration(analysis, occurrence)) {
@@ -548,7 +563,11 @@ export function getSemanticDiagnostics(
   }
 
   return annotateDiagnosticsWithCompilerText(
-    dedupeDiagnostics(diagnostics),
+    filterDiagnosticsForInactivePreprocessorBranches(
+      document,
+      dedupeDiagnostics(diagnostics),
+      collectKnownDependencyKeys(allAnalyses, effectiveIndex)
+    ),
     document,
     analysis
   );
@@ -630,6 +649,7 @@ function buildUnknownMemberDiagnostic(
   const lowerMemberName = occurrence.name.toLowerCase();
   const caseCandidates = [...memberNames]
     .filter((name) => name.toLowerCase() === lowerMemberName)
+    .filter((name) => name !== occurrence.name)
     .sort((a, b) => a.localeCompare(b));
 
   if (settings.enableCaseMismatch && caseCandidates.length > 0) {
@@ -1155,6 +1175,23 @@ function collectTypeCompatibilityDiagnostics(
         source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
         code: syntaxUnparsableStatementCode
       });
+      continue;
+    }
+
+    const primitiveConstructorDiagnostic =
+      buildPrimitiveConstructorCompatibilityDiagnostic(
+        document,
+        analysis,
+        allAnalyses,
+        index,
+        occurrence,
+        callArguments,
+        effectiveReturnTypes,
+        functionSources,
+        effectiveWorkspaceTypeCatalog
+      );
+    if (primitiveConstructorDiagnostic) {
+      diagnostics.push(primitiveConstructorDiagnostic);
       continue;
     }
 
@@ -2792,20 +2829,33 @@ function collectWorkspaceTypeInfosFromDeclarations(
       declaration,
       fullName
     );
+    const enumMembers =
+      declaration.typeKind === "enum"
+        ? collectWorkspaceEnumMembersFromTypeDeclaration(sourceText, declaration)
+        : [];
     const existing = output.get(fullName);
     if (existing) {
       output.set(fullName, {
         ...existing,
+        kind: existing.kind ?? declaration.typeKind,
+        source: existing.source ?? "workspace",
         parentShortName: existing.parentShortName ?? parentShortName,
-        members: mergeTypeMembers(existing.members, members)
+        members: mergeTypeMembers(existing.members, members),
+        enumMembers: dedupeStrings([
+          ...(existing.enumMembers ?? []),
+          ...enumMembers
+        ])
       });
     } else {
       output.set(fullName, {
         fullName,
         shortName: declaration.name,
         namespace: namespacePath,
+        kind: declaration.typeKind,
+        source: "workspace",
         parentShortName,
-        members
+        members,
+        enumMembers
       });
     }
 
@@ -2842,6 +2892,30 @@ function extractParentTypeNameFromDeclarationHeader(
   return parent.length > 0 ? parent : undefined;
 }
 
+function collectWorkspaceEnumMembersFromTypeDeclaration(
+  sourceText: string,
+  declaration: Extract<GrammarDeclarationNodeLike, { kind: "type" }>
+): string[] {
+  const declarationText = sourceText.slice(declaration.start, declaration.end);
+  const openBrace = declarationText.indexOf("{");
+  const closeBrace = declarationText.lastIndexOf("}");
+  if (openBrace < 0 || closeBrace <= openBrace) {
+    return [];
+  }
+
+  const bodyText = declarationText.slice(openBrace + 1, closeBrace);
+  const members: string[] = [];
+  const memberPattern = /\b([A-Za-z_][A-Za-z0-9_]*)\b\s*(?:=\s*[^,\n\r}]+)?(?:,|$)/g;
+  let match: RegExpExecArray | null;
+  while ((match = memberPattern.exec(bodyText)) !== null) {
+    const memberName = match[1]?.trim();
+    if (memberName && !isLanguageKeyword(memberName)) {
+      members.push(memberName);
+    }
+  }
+  return dedupeStrings(members);
+}
+
 function collectWorkspaceTypeMembersFromTypeDeclaration(
   declaration: Extract<GrammarDeclarationNodeLike, { kind: "type" }>,
   typeName: string
@@ -2873,11 +2947,7 @@ function collectWorkspaceTypeMembersFromTypeDeclaration(
 
     const returnType = normalizeTypeText(child.returnTypeText).trim();
     const args = child.parameters
-      .map((parameter) =>
-        parameter.name
-          ? `${parameter.typeText} ${parameter.name}`
-          : parameter.typeText
-      )
+      .map((parameter) => formatGrammarParameterForSignature(parameter))
       .join(", ");
     members.push({
       kind: "method",
@@ -2888,6 +2958,19 @@ function collectWorkspaceTypeMembersFromTypeDeclaration(
   }
 
   return mergeTypeMembers([], members);
+}
+
+function formatGrammarParameterForSignature(
+  parameter: GrammarFunctionNodeLike["parameters"][number]
+): string {
+  const base = parameter.name
+    ? `${parameter.typeText} ${parameter.name}`
+    : parameter.typeText;
+  if (!parameter.optional) {
+    return base;
+  }
+
+  return `${base} = ${parameter.defaultValueText ?? ""}`.trimEnd();
 }
 
 function mergeTypeMembers(
@@ -2918,6 +3001,19 @@ function mergeTypeMembers(
   return merged;
 }
 
+function dedupeStrings(values: string[]): string[] {
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (!value || seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    output.push(value);
+  }
+  return output;
+}
+
 export function createWorkspaceTypeAwareIndex(
   index: CompletionIndex,
   workspaceTypesByFullName: Map<string, TypeInfo>
@@ -2926,49 +3022,357 @@ export function createWorkspaceTypeAwareIndex(
     return index;
   }
 
-  const typeInfoByFullName = new Map(index.typeInfoByFullName);
   const typeFullNamesByShortName = new Map<string, string[]>();
   for (const [shortName, fullNames] of index.typeFullNamesByShortName) {
     typeFullNamesByShortName.set(shortName, [...fullNames]);
   }
 
-  for (const [fullName, typeInfo] of workspaceTypesByFullName) {
-    const existing = typeInfoByFullName.get(fullName);
-    if (existing) {
-      typeInfoByFullName.set(fullName, {
-        ...existing,
-        members: mergeTypeMembers(existing.members, typeInfo.members)
-      });
-    } else {
-      typeInfoByFullName.set(fullName, {
-        ...typeInfo,
-        members: [...typeInfo.members]
-      });
-    }
-
-    const shortNames = [
-      typeInfo.shortName,
-      fullName.split("::").pop() ?? typeInfo.shortName
-    ];
-    for (const shortName of shortNames) {
-      const existingFullNames = typeFullNamesByShortName.get(shortName);
-      if (!existingFullNames) {
-        typeFullNamesByShortName.set(shortName, [fullName]);
-        continue;
-      }
-      if (!existingFullNames.includes(fullName)) {
-        existingFullNames.push(fullName);
-      }
-    }
-  }
-
-  return {
+  const workspaceIndex: CompletionIndex = {
     ...index,
-    typeInfoByFullName,
+    global: cloneCompletionBucket(index.global),
+    namespaceBuckets: new Map(
+      [...index.namespaceBuckets.entries()].map(([namespaceName, bucket]) => [
+        namespaceName,
+        cloneCompletionBucket(bucket)
+      ])
+    ),
+    namespaceChildren: new Map(
+      [...index.namespaceChildren.entries()].map(([namespaceName, children]) => [
+        namespaceName,
+        new Set(children)
+      ])
+    ),
+    semanticTypes: index.semanticTypes.clone(),
+    typeInfoByFullName: new Map(index.typeInfoByFullName),
     typeFullNamesByShortName,
     resolvedMembersCache: new Map(),
     resolvedMemberCompletionsCache: new Map()
   };
+
+  for (const [fullName, typeInfo] of workspaceTypesByFullName) {
+    registerSemanticTypeInfo(workspaceIndex, {
+      ...typeInfo,
+      fullName,
+      source: typeInfo.source ?? "workspace",
+      members: [...typeInfo.members],
+      enumMembers: [...(typeInfo.enumMembers ?? [])]
+    });
+    registerWorkspaceTypeCompletionItems(workspaceIndex, {
+      ...typeInfo,
+      fullName
+    });
+  }
+
+  return workspaceIndex;
+}
+
+function cloneCompletionBucket(
+  bucket: CompletionIndex["global"]
+): CompletionIndex["global"] {
+  return {
+    items: [...bucket.items],
+    seen: new Set(bucket.seen),
+    functionByLabel: new Map(bucket.functionByLabel)
+  };
+}
+
+function registerWorkspaceTypeCompletionItems(
+  index: CompletionIndex,
+  typeInfo: TypeInfo
+): void {
+  const parentNamespace =
+    typeInfo.namespace && typeInfo.namespace.length > 0
+      ? typeInfo.namespace
+      : undefined;
+
+  addSymbol(index, parentNamespace, {
+    label: typeInfo.shortName,
+    kind: getWorkspaceTypeCompletionKind(typeInfo),
+    detail: `Workspace ${typeInfo.kind ?? "type"}`
+  });
+
+  if (typeInfo.kind !== "enum") {
+    return;
+  }
+
+  for (const enumMember of typeInfo.enumMembers ?? []) {
+    addSymbol(index, typeInfo.fullName, {
+      label: enumMember,
+      kind: CompletionItemKind.EnumMember,
+      detail: `Enum value (${typeInfo.shortName})`
+    });
+  }
+}
+
+function getWorkspaceTypeCompletionKind(typeInfo: TypeInfo): CompletionItemKind {
+  switch (typeInfo.kind) {
+    case "enum":
+      return CompletionItemKind.Enum;
+    case "interface":
+      return CompletionItemKind.Interface;
+    default:
+      return CompletionItemKind.Class;
+  }
+}
+
+interface DependencyGuardFrame {
+  inactive: boolean;
+  branchTaken: boolean;
+}
+
+function filterDiagnosticsForInactiveDependencyGuards(
+  document: TextDocument,
+  diagnostics: Diagnostic[],
+  allAnalyses: DocumentAnalysis[],
+  index: CompletionIndex
+): Diagnostic[] {
+  if (diagnostics.length === 0) {
+    return diagnostics;
+  }
+
+  const inactiveLines = collectInactiveDependencyGuardLines(
+    document.getText(),
+    collectKnownDependencyKeys(allAnalyses, index)
+  );
+  if (inactiveLines.size === 0) {
+    return diagnostics;
+  }
+
+  return diagnostics.filter(
+    (diagnostic) => !inactiveLines.has(diagnostic.range.start.line)
+  );
+}
+
+function collectInactiveDependencyGuardLines(
+  text: string,
+  knownDependencyKeys: Set<string>
+): Set<number> {
+  const inactiveLines = new Set<number>();
+  const frames: DependencyGuardFrame[] = [];
+  const lines = text.split(/\r\n|\r|\n/);
+
+  for (let lineNumber = 0; lineNumber < lines.length; lineNumber += 1) {
+    const directive = parseDependencyGuardDirective(
+      lines[lineNumber],
+      knownDependencyKeys
+    );
+    if (directive) {
+      applyDependencyGuardDirective(frames, directive);
+      continue;
+    }
+
+    if (frames.some((frame) => frame.inactive)) {
+      inactiveLines.add(lineNumber);
+    }
+  }
+
+  return inactiveLines;
+}
+
+type DependencyGuardDirective =
+  | { kind: "if" | "elif"; active: boolean | undefined }
+  | { kind: "else" | "endif" };
+
+function parseDependencyGuardDirective(
+  lineText: string,
+  knownDependencyKeys: Set<string>
+): DependencyGuardDirective | undefined {
+  const match = /^\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)$/i.exec(
+    lineText
+  );
+  if (!match) {
+    return undefined;
+  }
+
+  const directive = match[1].toLowerCase();
+  const condition = (match[2] ?? "").trim();
+  if (directive === "else" || directive === "endif") {
+    return { kind: directive };
+  }
+  if (directive === "ifdef") {
+    return {
+      kind: "if",
+      active: evaluateDependencyMacro(condition, knownDependencyKeys)
+    };
+  }
+  if (directive === "ifndef") {
+    const active = evaluateDependencyMacro(condition, knownDependencyKeys);
+    return { kind: "if", active: active === undefined ? undefined : !active };
+  }
+  if (directive === "if" || directive === "elif") {
+    return {
+      kind: directive,
+      active: evaluateDependencyCondition(condition, knownDependencyKeys)
+    };
+  }
+
+  return undefined;
+}
+
+function applyDependencyGuardDirective(
+  frames: DependencyGuardFrame[],
+  directive: DependencyGuardDirective
+): void {
+  if (directive.kind === "if") {
+    const active = directive.active;
+    frames.push({
+      inactive: active === false,
+      branchTaken: active === true
+    });
+    return;
+  }
+
+  if (directive.kind === "elif") {
+    const frame = frames[frames.length - 1];
+    if (!frame) {
+      return;
+    }
+    if (frame.branchTaken) {
+      frame.inactive = true;
+      return;
+    }
+    const active = directive.active;
+    frame.inactive = active === false;
+    frame.branchTaken = active === true;
+    return;
+  }
+
+  if (directive.kind === "else") {
+    const frame = frames[frames.length - 1];
+    if (!frame) {
+      return;
+    }
+    frame.inactive = frame.branchTaken;
+    frame.branchTaken = true;
+    return;
+  }
+
+  frames.pop();
+}
+
+function evaluateDependencyCondition(
+  condition: string,
+  knownDependencyKeys: Set<string>
+): boolean | undefined {
+  let text = condition.trim();
+  let negated = false;
+
+  while (text.startsWith("(") && text.endsWith(")")) {
+    const inner = text.slice(1, -1).trim();
+    if (!inner) {
+      break;
+    }
+    text = inner;
+  }
+
+  if (text.startsWith("!")) {
+    negated = true;
+    text = text.slice(1).trim();
+  }
+
+  const definedMatch = /^defined\s*\(\s*(DEPENDENCY_[A-Za-z0-9_]+)\s*\)$/i.exec(
+    text
+  );
+  if (definedMatch) {
+    const active = evaluateDependencyMacro(definedMatch[1], knownDependencyKeys);
+    return active === undefined ? undefined : negated ? !active : active;
+  }
+
+  const active = evaluateDependencyMacro(text, knownDependencyKeys);
+  return active === undefined ? undefined : negated ? !active : active;
+}
+
+function evaluateDependencyMacro(
+  macroName: string,
+  knownDependencyKeys: Set<string>
+): boolean | undefined {
+  const dependencyKey = dependencyMacroNameToKey(macroName);
+  if (!dependencyKey) {
+    return undefined;
+  }
+
+  return knownDependencyKeys.has(dependencyKey);
+}
+
+function collectKnownDependencyKeys(
+  allAnalyses: DocumentAnalysis[],
+  index: CompletionIndex
+): Set<string> {
+  const known = new Set<string>();
+  const add = (value: string | undefined): void => {
+    const key = normalizeDependencyKey(value);
+    if (key) {
+      known.add(key);
+    }
+  };
+
+  for (const namespaceName of index.namespaceBuckets.keys()) {
+    add(namespaceName);
+    add(namespaceName.split("::").pop());
+  }
+  for (const namespaceName of index.namespaceChildren.keys()) {
+    add(namespaceName);
+    add(namespaceName.split("::").pop());
+  }
+  for (const typeInfo of index.typeInfoByFullName.values()) {
+    add(typeInfo.shortName);
+    add(typeInfo.namespace);
+    add(typeInfo.namespace.split("::").pop());
+  }
+  for (const qualifiedName of index.coreFunctionSignaturesByQualifiedName.keys()) {
+    add(qualifiedName.split("::")[0]);
+  }
+  for (const analysis of allAnalyses) {
+    for (const part of extractUriPathParts(analysis.uri)) {
+      add(part);
+      add(part.replace(/\.op$/i, ""));
+    }
+  }
+
+  return known;
+}
+
+function extractUriPathParts(uri: string): string[] {
+  const opDependencyMatch = /^opdep:\/\/([^!]+)!/i.exec(uri);
+  const rawPath = opDependencyMatch
+    ? decodeUriComponentSafely(opDependencyMatch[1])
+    : uri.startsWith("file:")
+      ? decodeUriComponentSafely(uri.replace(/^file:\/+/i, ""))
+      : uri;
+
+  return rawPath
+    .split(/[\\/]+/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
+function decodeUriComponentSafely(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function dependencyMacroNameToKey(macroName: string | undefined): string | undefined {
+  if (!macroName) {
+    return undefined;
+  }
+
+  const match = /^DEPENDENCY_([A-Za-z0-9_]+)$/i.exec(macroName.trim());
+  return match ? normalizeDependencyKey(match[1]) : undefined;
+}
+
+function normalizeDependencyKey(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const normalized = value
+    .replace(/\.op$/i, "")
+    .replace(/[^A-Za-z0-9]/g, "")
+    .toLowerCase();
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 function getMemberVariableTypesForOffset(
@@ -3114,7 +3518,7 @@ function collectParsedCallableSignaturesForOccurrence(
     if (!signature) {
       continue;
     }
-    const key = `${signature.returnType}:${signature.label}`;
+    const key = getCallableSemanticKey(signature);
     if (seen.has(key)) {
       continue;
     }
@@ -3123,6 +3527,60 @@ function collectParsedCallableSignaturesForOccurrence(
   }
 
   return parsed;
+}
+
+function buildPrimitiveConstructorCompatibilityDiagnostic(
+  document: TextDocument,
+  analysis: DocumentAnalysis,
+  allAnalyses: DocumentAnalysis[],
+  index: CompletionIndex,
+  occurrence: DocumentAnalysis["occurrences"][number],
+  callArguments: CallArgumentSlice,
+  workspaceFunctionReturnTypes: Map<string, string>,
+  functionSources: ExpressionFunctionSources,
+  workspaceTypeCatalog?: WorkspaceTypeCatalog
+): Diagnostic | undefined {
+  if (
+    occurrence.qualifier !== "none" ||
+    !isPrimitiveTypeName(occurrence.name) ||
+    callArguments.args.length !== 1
+  ) {
+    return undefined;
+  }
+
+  const argument = callArguments.args[0];
+  const actualType = inferExpressionTypeAtOffset(
+    document,
+    analysis,
+    allAnalyses,
+    index,
+    argument.start,
+    argument.text,
+    workspaceFunctionReturnTypes,
+    functionSources,
+    workspaceTypeCatalog
+  );
+  if (isEffectivelyUnknownArgumentType(actualType)) {
+    return undefined;
+  }
+
+  const compatibility = evaluateAssignmentCompatibility(
+    index,
+    "=",
+    occurrence.name,
+    actualType
+  );
+  if (compatibility !== "incompatible") {
+    return undefined;
+  }
+
+  return {
+    severity: DiagnosticSeverity.Error,
+    range: offsetToRange(document, argument.start, argument.end),
+    message: `Cannot convert "${actualType}" to "${occurrence.name}" in primitive constructor call.\n`,
+    source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+    code: callArgumentTypeMismatchCode
+  };
 }
 
 function buildMemberCallCompatibilityDiagnostic(
@@ -3663,11 +4121,10 @@ function isAmbiguousCallableResolution(
   candidates: ParsedCallableSignature[],
   actualTypes: Array<string | undefined>
 ): boolean {
+  const bestKey = getCallableSemanticKey(best);
+
   for (const candidate of candidates) {
-    if (
-      candidate.label === best.label &&
-      candidate.returnType === best.returnType
-    ) {
+    if (getCallableSemanticKey(candidate) === bestKey) {
       continue;
     }
 
@@ -3695,6 +4152,27 @@ function isAmbiguousCallableResolution(
   }
 
   return false;
+}
+
+function getCallableSemanticKey(signature: ParsedCallableSignature): string {
+  const parameterKey = signature.parameters
+    .map((parameter) =>
+      [
+        normalizeCallableTypeForSemanticKey(parameter.typeText),
+        parameter.optional ? "optional" : "required",
+        parameter.variadic ? "variadic" : "fixed"
+      ].join(":")
+    )
+    .join(",");
+  return `${normalizeCallableTypeForSemanticKey(signature.returnType)} ${signature.name}(${parameterKey})`;
+}
+
+function normalizeCallableTypeForSemanticKey(typeText: string): string {
+  return normalizeTypeText(typeText)
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\s*([@&])\s*/g, "$1")
+    .replace(/\b(?:inout|in|out)\b/gi, (value) => value.toLowerCase());
 }
 
 function buildHandleModeCallDiagnostic(
@@ -4546,8 +5024,7 @@ function parseTypeDescriptor(typeText: string | undefined): TypeDescriptor | und
   }
 
   const shortBase = (base.split("::").pop() ?? base).toLowerCase();
-  const isTemplateParameter =
-    /^[A-Z][A-Za-z0-9_]*$/.test(base) && !base.includes("::");
+  const isTemplateParameter = /^[A-Z]$/.test(base);
   const isAny = shortBase === "auto" || shortBase === "var" || shortBase === "?";
 
   return {
@@ -5288,6 +5765,14 @@ function isPrimitiveTypeName(typeName: string | undefined): boolean {
   );
 }
 
+function isGenericReferenceTypeName(typeName: string | undefined): boolean {
+  if (!typeName) {
+    return false;
+  }
+
+  return (normalizeTypeText(typeName).split("::").pop() ?? typeName).toLowerCase() === "ref";
+}
+
 function isBoolTypeName(typeName: string | undefined): boolean {
   if (!typeName) {
     return false;
@@ -5441,28 +5926,45 @@ function collectCallableSignaturesForOccurrence(
   }
 
   const activeNamespacePath = resolveOccurrenceNamespacePath(analysis, occurrence);
-  const usingNamespacePaths = collectUsingNamespacePathsBeforeOffset(
-    analysis.maskedText,
+  const usingNamespacePaths = collectVisibleUsingNamespacePathsAtOffset(
+    analysis.grammarProgram.declarations,
     occurrence.start
   );
   const currentModuleRootPath = getAnalysisModuleRootForUnqualifiedLookup(analysis);
 
   for (const workspaceAnalysis of allAnalyses) {
-    if (
-      !isAnalysisInSameUnqualifiedLookupModule(
-        currentModuleRootPath,
-        workspaceAnalysis
-      )
-    ) {
-      continue;
+    const isSameLookupModule = isAnalysisInSameUnqualifiedLookupModule(
+      currentModuleRootPath,
+      workspaceAnalysis
+    );
+    if (isSameLookupModule) {
+      for (const declaration of workspaceAnalysis.functions) {
+        if (declaration.name !== occurrence.name) {
+          continue;
+        }
+        if (
+          !isUnqualifiedFunctionDeclarationVisibleForOccurrence(
+            declaration.namespacePath,
+            activeNamespacePath,
+            usingNamespacePaths
+          )
+        ) {
+          continue;
+        }
+
+        signatures.add(
+          `${declaration.returnType} ${declaration.name}(${declaration.argsText})`.trim()
+        );
+      }
     }
-    for (const declaration of workspaceAnalysis.functions) {
-      if (declaration.name !== occurrence.name) {
+
+    for (const importDeclaration of workspaceAnalysis.importFunctionDeclarations) {
+      if (importDeclaration.functionName !== occurrence.name) {
         continue;
       }
       if (
         !isUnqualifiedFunctionDeclarationVisibleForOccurrence(
-          declaration.namespacePath,
+          importDeclaration.namespacePath,
           activeNamespacePath,
           usingNamespacePaths
         )
@@ -5471,13 +5973,42 @@ function collectCallableSignaturesForOccurrence(
       }
 
       signatures.add(
-        `${declaration.returnType} ${declaration.name}(${declaration.argsText})`.trim()
+        `${importDeclaration.returnType} ${importDeclaration.functionName}(${importDeclaration.argsText})`.trim()
       );
     }
   }
 
   for (const signature of index.coreFunctionSignatures.get(occurrence.name) ?? []) {
     signatures.add(signature.trim());
+  }
+
+  for (const [
+    qualifiedName,
+    qualifiedSignatures
+  ] of index.coreFunctionSignaturesByQualifiedName) {
+    const separatorIndex = qualifiedName.lastIndexOf("::");
+    if (separatorIndex <= 0) {
+      continue;
+    }
+
+    const namespacePath = qualifiedName.slice(0, separatorIndex);
+    const functionName = qualifiedName.slice(separatorIndex + 2);
+    if (functionName !== occurrence.name) {
+      continue;
+    }
+    if (
+      !isUnqualifiedFunctionDeclarationVisibleForOccurrence(
+        namespacePath,
+        activeNamespacePath,
+        usingNamespacePaths
+      )
+    ) {
+      continue;
+    }
+
+    for (const signature of qualifiedSignatures) {
+      signatures.add(signature.trim());
+    }
   }
 
   return [...signatures];
@@ -5523,30 +6054,6 @@ function findEnclosingNamespacePathAtOffset(
   return namespacePath;
 }
 
-function collectUsingNamespacePathsBeforeOffset(
-  maskedText: string,
-  offset: number
-): Set<string> {
-  const visibleText = maskedText.slice(0, Math.max(0, offset));
-  const namespaces = new Set<string>();
-  const pattern =
-    /\busing\s+namespace\s+([A-Za-z_][A-Za-z0-9_]*(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)*)\s*;/g;
-
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(visibleText)) !== null) {
-    const namespacePath = match[1]
-      .split("::")
-      .map((segment) => segment.trim())
-      .filter((segment) => segment.length > 0)
-      .join("::");
-    if (namespacePath.length > 0) {
-      namespaces.add(namespacePath);
-    }
-  }
-
-  return namespaces;
-}
-
 function isUnqualifiedFunctionDeclarationVisibleForOccurrence(
   declarationNamespacePath: string,
   activeNamespacePath: string,
@@ -5555,10 +6062,26 @@ function isUnqualifiedFunctionDeclarationVisibleForOccurrence(
   if (!declarationNamespacePath) {
     return true;
   }
-  if (declarationNamespacePath === activeNamespacePath) {
+  if (isSameOrAncestorNamespace(declarationNamespacePath, activeNamespacePath)) {
     return true;
   }
   return usingNamespacePaths.has(declarationNamespacePath);
+}
+
+function isSameOrAncestorNamespace(
+  candidateNamespacePath: string,
+  activeNamespacePath: string
+): boolean {
+  if (!candidateNamespacePath) {
+    return true;
+  }
+  if (!activeNamespacePath) {
+    return false;
+  }
+  if (candidateNamespacePath === activeNamespacePath) {
+    return true;
+  }
+  return activeNamespacePath.startsWith(`${candidateNamespacePath}::`);
 }
 
 function getAnalysisModuleRootForUnqualifiedLookup(
@@ -5996,6 +6519,37 @@ function isNamespacePrefix(text: string, endOffset: number): boolean {
 
   const secondColon = findNextNonWhitespaceIndex(text, firstColon + 1);
   return secondColon >= 0 && text[secondColon] === ":";
+}
+
+function isKnownNamespacePrefixOccurrence(
+  document: TextDocument,
+  analysis: DocumentAnalysis,
+  occurrence: DocumentAnalysis["occurrences"][number],
+  index: CompletionIndex,
+  allAnalyses: DocumentAnalysis[],
+  knownTypeNames?: Set<string>,
+  lineTextCache?: Map<number, string>
+): boolean {
+  if (occurrence.qualifier !== "none") {
+    return false;
+  }
+
+  if (!isNamespacePrefix(analysis.text, occurrence.end)) {
+    return false;
+  }
+
+  const lineText = getLineText(document, occurrence.range.start.line, lineTextCache);
+  const trailingText = lineText.slice(occurrence.range.end.character);
+  if (!/^\s*::/.test(trailingText)) {
+    return false;
+  }
+
+  return isKnownNamespacePath(
+    occurrence.name,
+    index,
+    allAnalyses,
+    knownTypeNames
+  );
 }
 
 function looksLikeTypeContext(
@@ -6576,6 +7130,9 @@ function collectSuggestions(
 
   for (const candidate of candidates) {
     const lowerCandidate = candidate.toLowerCase();
+    if (candidate === unknownName) {
+      continue;
+    }
     if (
       lowerCandidate.startsWith(lowerUnknown) ||
       lowerUnknown.startsWith(lowerCandidate) ||
@@ -6589,6 +7146,9 @@ function collectSuggestions(
     const firstChar = lowerUnknown[0];
     if (firstChar) {
       for (const candidate of candidates) {
+        if (candidate === unknownName) {
+          continue;
+        }
         if (candidate[0]?.toLowerCase() === firstChar) {
           suggestions.push(candidate);
         }
@@ -6602,6 +7162,13 @@ function collectSuggestions(
   return suggestions
     .slice(0, 5)
     .sort((a, b) => a.localeCompare(b));
+}
+
+function getCaseMismatchCandidates(
+  actualName: string,
+  candidates: readonly string[]
+): string[] {
+  return candidates.filter((candidate) => candidate !== actualName);
 }
 
 function formatSuggestions(suggestions: string[]): string {
@@ -6640,6 +7207,10 @@ function isKnownTypeName(
   }
 
   if (isPrimitiveTypeName(identifier)) {
+    return true;
+  }
+
+  if (isGenericReferenceTypeName(identifier)) {
     return true;
   }
 

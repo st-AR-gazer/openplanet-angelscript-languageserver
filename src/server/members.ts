@@ -2,13 +2,20 @@ import {
   CompletionItem,
   CompletionItemKind
 } from "vscode-languageserver/node";
+import {
+  createSemanticTypeInfo,
+  type SemanticSymbolSource,
+  type SemanticTypeKind
+} from "openplanet-angelscript-core";
 import type { TextDocument } from "vscode-languageserver-textdocument";
 import type {
   CompletionIndex,
+  TypeInfo,
   TypeMemberInfo,
   TypeResolutionContext
 } from "./types";
-import { readString, toObjectArray } from "./util";
+import { getDefaultCompletionSortText } from "./completions";
+import { readString, toObjectArray, toRecord } from "./util";
 
 const indexedContainerTypeNames = new Set<string>([
   "array",
@@ -35,7 +42,7 @@ export function getDotCompletionContext(
     return undefined;
   }
 
-  const receiverText = linePrefix.slice(0, dotIndex).trimEnd();
+  const receiverText = extractReceiverExpression(linePrefix.slice(0, dotIndex));
   const memberPrefix = linePrefix.slice(dotIndex + 1);
   if (!receiverText) {
     return undefined;
@@ -46,6 +53,78 @@ export function getDotCompletionContext(
   }
 
   return { receiverText, memberPrefix };
+}
+
+function extractReceiverExpression(beforeDot: string): string | undefined {
+  let text = beforeDot.trimEnd();
+  if (!text) {
+    return undefined;
+  }
+
+  let depth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escapeNext = false;
+  let cutIndex = -1;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (ch === "\\") {
+      escapeNext = true;
+      continue;
+    }
+
+    if (!inDoubleQuote && ch === "'") {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+
+    if (!inSingleQuote && ch === "\"") {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+
+    if (inSingleQuote || inDoubleQuote) {
+      continue;
+    }
+
+    if (depth === 0 && (ch === ";" || ch === "=" || ch === ",")) {
+      cutIndex = i;
+      continue;
+    }
+
+    if (depth === 0 && ch === "(" && isControlKeywordBefore(text, i)) {
+      cutIndex = i;
+      depth += 1;
+      continue;
+    }
+
+    if (ch === "(") {
+      depth += 1;
+      continue;
+    }
+
+    if (ch === ")") {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+  }
+
+  const unmatchedOpenParen = findLastUnmatchedOpenParen(text);
+  if (unmatchedOpenParen >= 0) {
+    cutIndex = Math.max(cutIndex, unmatchedOpenParen);
+  }
+
+  text = text.slice(cutIndex + 1).trim();
+  text = text.replace(/^(?:return|yield)\b\s*/, "").trim();
+
+  return text.length > 0 ? text : undefined;
 }
 
 export function findLastDotOutsideParens(text: string): number {
@@ -120,6 +199,63 @@ export function findLastDotOutsideParens(text: string): number {
   }
 
   return lastDot;
+}
+
+function findLastUnmatchedOpenParen(text: string): number {
+  let parenDepth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escapeNext = false;
+
+  for (let i = text.length - 1; i >= 0; i -= 1) {
+    const ch = text[i];
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (ch === "\\") {
+      escapeNext = true;
+      continue;
+    }
+
+    if (!inDoubleQuote && ch === "'") {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+
+    if (!inSingleQuote && ch === "\"") {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+
+    if (inSingleQuote || inDoubleQuote) {
+      continue;
+    }
+
+    if (ch === ")") {
+      parenDepth += 1;
+      continue;
+    }
+
+    if (ch !== "(") {
+      continue;
+    }
+
+    if (parenDepth === 0) {
+      return i;
+    }
+
+    parenDepth = Math.max(0, parenDepth - 1);
+  }
+
+  return -1;
+}
+
+function isControlKeywordBefore(text: string, index: number): boolean {
+  const before = text.slice(0, index).trimEnd();
+  return /\b(?:if|while|for|switch|catch)$/.test(before);
 }
 
 export function collectMemberCompletionItems(
@@ -251,16 +387,12 @@ export function registerGameTypeInfo(
   index: CompletionIndex,
   namespaceName: string,
   typeName: string,
-  typeRecord: Record<string, unknown>
+  typeRecord: Record<string, unknown>,
+  source: SemanticSymbolSource = "openplanet-game-json"
 ): void {
   const fullName = `${namespaceName}::${typeName}`;
 
-  registerTypeShortName(index, typeName, fullName);
   index.gameTypeFullNames.add(fullName);
-
-  if (index.typeInfoByFullName.has(fullName)) {
-    return;
-  }
 
   const parentShortName = readString(typeRecord.p);
   const members: TypeMemberInfo[] = [];
@@ -289,10 +421,12 @@ export function registerGameTypeInfo(
     });
   }
 
-  index.typeInfoByFullName.set(fullName, {
+  registerSemanticTypeInfo(index, {
     fullName,
     shortName: typeName,
     namespace: namespaceName,
+    kind: "class",
+    source,
     parentShortName,
     members
   });
@@ -301,17 +435,12 @@ export function registerGameTypeInfo(
 export function registerCoreClassTypeInfo(
   index: CompletionIndex,
   typeFullName: string,
-  classRecord: Record<string, unknown>
+  classRecord: Record<string, unknown>,
+  source: SemanticSymbolSource = "openplanet-core-json"
 ): void {
   const splitIndex = typeFullName.lastIndexOf("::");
   const namespaceName = splitIndex >= 0 ? typeFullName.slice(0, splitIndex) : "";
   const shortName = splitIndex >= 0 ? typeFullName.slice(splitIndex + 2) : typeFullName;
-
-  registerTypeShortName(index, shortName, typeFullName);
-
-  if (index.typeInfoByFullName.has(typeFullName)) {
-    return;
-  }
 
   const members: TypeMemberInfo[] = [];
   const accessorPropertyTypes = new Map<string, string>();
@@ -369,6 +498,21 @@ export function registerCoreClassTypeInfo(
     }
   }
 
+  for (const behaviorRecord of toObjectArray(classRecord.behaviors)) {
+    const funcRecord = toRecord(behaviorRecord.func);
+    const constructorName = getCoreBehaviorConstructorName(funcRecord, shortName);
+    if (!constructorName) {
+      continue;
+    }
+
+    members.push({
+      name: constructorName,
+      kind: "method",
+      returnType: readString(funcRecord.returntypedecl) ?? typeFullName,
+      args: formatCoreArgs(funcRecord.args)
+    });
+  }
+
   for (const [propertyName, propertyType] of accessorPropertyTypes) {
     if (explicitPropertyNames.has(propertyName)) {
       continue;
@@ -381,33 +525,100 @@ export function registerCoreClassTypeInfo(
     });
   }
 
-  index.typeInfoByFullName.set(typeFullName, {
+  registerSemanticTypeInfo(index, {
     fullName: typeFullName,
     shortName,
     namespace: namespaceName,
+    kind: "class",
+    source,
     members
   });
 }
 
+function getCoreBehaviorConstructorName(
+  funcRecord: Record<string, unknown>,
+  shortName: string
+): string | undefined {
+  const decl = readString(funcRecord.decl);
+  if (decl) {
+    const openParen = decl.indexOf("(");
+    const header = openParen >= 0 ? decl.slice(0, openParen).trim() : decl.trim();
+    const nameMatch = /([A-Za-z_][A-Za-z0-9_:]*)\s*$/.exec(header);
+    const declName = nameMatch?.[1];
+    const declLeafName = declName?.split("::").pop();
+    if (declLeafName === shortName) {
+      return shortName;
+    }
+  }
+
+  const funcName = readString(funcRecord.name);
+  const funcLeafName = funcName?.split("::").pop();
+  return funcLeafName === shortName ? shortName : undefined;
+}
+
 export function registerNamedTypeInfo(
   index: CompletionIndex,
-  typeFullName: string
+  typeFullName: string,
+  kind?: SemanticTypeKind,
+  source: SemanticSymbolSource = "unknown",
+  enumMembers: string[] = [],
+  parentShortName?: string
 ): void {
   const splitIndex = typeFullName.lastIndexOf("::");
   const namespaceName = splitIndex >= 0 ? typeFullName.slice(0, splitIndex) : "";
   const shortName = splitIndex >= 0 ? typeFullName.slice(splitIndex + 2) : typeFullName;
 
-  registerTypeShortName(index, shortName, typeFullName);
-
-  if (index.typeInfoByFullName.has(typeFullName)) {
-    return;
-  }
-
-  index.typeInfoByFullName.set(typeFullName, {
+  registerSemanticTypeInfo(index, {
     fullName: typeFullName,
     shortName,
     namespace: namespaceName,
+    kind,
+    source,
+    enumMembers,
+    parentShortName,
     members: []
+  });
+}
+
+export function registerSemanticTypeInfo(
+  index: CompletionIndex,
+  typeInfo: TypeInfo
+): void {
+  registerTypeShortName(index, typeInfo.shortName, typeInfo.fullName);
+  const leafName = typeInfo.fullName.split("::").pop() ?? typeInfo.shortName;
+  registerTypeShortName(index, leafName, typeInfo.fullName);
+
+  index.semanticTypes.register(createSemanticTypeInfo({
+    fullName: typeInfo.fullName,
+    shortName: typeInfo.shortName,
+    namespace: typeInfo.namespace,
+    kind: typeInfo.kind ?? "unknown",
+    source: typeInfo.source ?? "unknown",
+    members: typeInfo.members,
+    enumMembers: typeInfo.enumMembers ?? [],
+    parentShortName: typeInfo.parentShortName
+  }));
+
+  const existing = index.typeInfoByFullName.get(typeInfo.fullName);
+  if (!existing) {
+    index.typeInfoByFullName.set(typeInfo.fullName, {
+      ...typeInfo,
+      members: [...typeInfo.members],
+      enumMembers: [...(typeInfo.enumMembers ?? [])]
+    });
+    return;
+  }
+
+  index.typeInfoByFullName.set(typeInfo.fullName, {
+    ...existing,
+    kind: existing.kind ?? typeInfo.kind,
+    source: existing.source ?? typeInfo.source,
+    parentShortName: existing.parentShortName ?? typeInfo.parentShortName,
+    members: mergeTypeMembers(existing.members, typeInfo.members),
+    enumMembers: dedupeStrings([
+      ...(existing.enumMembers ?? []),
+      ...(typeInfo.enumMembers ?? [])
+    ])
   });
 }
 
@@ -517,6 +728,47 @@ function registerTypeShortName(
   }
 }
 
+function mergeTypeMembers(
+  base: TypeMemberInfo[],
+  incoming: TypeMemberInfo[]
+): TypeMemberInfo[] {
+  const merged: TypeMemberInfo[] = [...base];
+  const seen = new Set<string>(
+    base.map((member) =>
+      member.kind === "property"
+        ? `property|${member.name}|${member.type ?? ""}`
+        : `method|${member.name}|${member.returnType ?? ""}|${member.args ?? ""}`
+    )
+  );
+
+  for (const member of incoming) {
+    const key =
+      member.kind === "property"
+        ? `property|${member.name}|${member.type ?? ""}`
+        : `method|${member.name}|${member.returnType ?? ""}|${member.args ?? ""}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(member);
+  }
+
+  return merged;
+}
+
+function dedupeStrings(values: string[]): string[] {
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (!value || seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    output.push(value);
+  }
+  return output;
+}
+
 function getResolvedMemberCompletionItems(
   index: CompletionIndex,
   typeFullName: string
@@ -529,7 +781,7 @@ function getResolvedMemberCompletionItems(
   const members = getResolvedMembers(index, typeFullName);
   const items = members
     .map((member) => memberToCompletionItem(member))
-    .sort((a, b) => a.label.localeCompare(b.label));
+    .sort(compareCompletionItemsForDisplay);
 
   index.resolvedMemberCompletionsCache.set(typeFullName, items);
   return items;
@@ -542,7 +794,11 @@ function memberToCompletionItem(member: TypeMemberInfo): CompletionItem {
       label: member.name,
       kind: CompletionItemKind.Field,
       detail: typeDecl,
-      labelDetails: { description: typeDecl }
+      labelDetails: { description: typeDecl },
+      sortText: getDefaultCompletionSortText({
+        label: member.name,
+        kind: CompletionItemKind.Field
+      })
     };
   }
 
@@ -556,8 +812,26 @@ function memberToCompletionItem(member: TypeMemberInfo): CompletionItem {
     labelDetails: {
       detail: `(${args})`,
       description: returnType
-    }
+    },
+    sortText: getDefaultCompletionSortText({
+      label: member.name,
+      kind: CompletionItemKind.Method
+    })
   };
+}
+
+function compareCompletionItemsForDisplay(
+  left: CompletionItem,
+  right: CompletionItem
+): number {
+  const leftKey = left.sortText ?? left.label;
+  const rightKey = right.sortText ?? right.label;
+  const sortResult = leftKey.localeCompare(rightKey);
+  if (sortResult !== 0) {
+    return sortResult;
+  }
+
+  return left.label.localeCompare(right.label);
 }
 
 function formatMethodSignature(member: TypeMemberInfo): string {
@@ -818,7 +1092,7 @@ function tryResolveBaseExpressionType(
 
     const localReturnType = context?.localFunctionReturnTypes.get(head);
     const returnType =
-      localReturnType ?? index.coreFunctionReturnTypes.get(head);
+      localReturnType ?? tryResolveCoreFunctionReturnType(index, head);
     if (!returnType) {
       if (head === "GetApp") {
         resolved = {
@@ -852,6 +1126,60 @@ function tryResolveBaseExpressionType(
     ...resolved,
     preferredNamespace
   }, trimmed.slice(cursor));
+}
+
+function tryResolveCoreFunctionReturnType(
+  index: CompletionIndex,
+  callableName: string
+): string | undefined {
+  const directReturnType = index.coreFunctionReturnTypes.get(callableName);
+  if (directReturnType) {
+    return directReturnType;
+  }
+
+  const qualifiedSignatures =
+    index.coreFunctionSignaturesByQualifiedName.get(callableName);
+  if (qualifiedSignatures) {
+    for (const signature of qualifiedSignatures) {
+      const returnType = parseReturnTypeFromCallableSignature(signature);
+      if (returnType) {
+        return returnType;
+      }
+    }
+  }
+
+  const unqualifiedName = callableName.split("::").pop() ?? callableName;
+  if (unqualifiedName !== callableName) {
+    const unqualifiedReturnType = index.coreFunctionReturnTypes.get(unqualifiedName);
+    if (unqualifiedReturnType) {
+      return unqualifiedReturnType;
+    }
+  }
+
+  for (const signature of index.coreFunctionSignatures.get(unqualifiedName) ?? []) {
+    const returnType = parseReturnTypeFromCallableSignature(signature);
+    if (returnType) {
+      return returnType;
+    }
+  }
+
+  return undefined;
+}
+
+function parseReturnTypeFromCallableSignature(signature: string): string | undefined {
+  const openParen = signature.indexOf("(");
+  if (openParen < 0) {
+    return undefined;
+  }
+
+  const header = signature.slice(0, openParen).trim();
+  const nameMatch = /([A-Za-z_][A-Za-z0-9_:]*)\s*$/.exec(header);
+  if (!nameMatch) {
+    return undefined;
+  }
+
+  const returnType = header.slice(0, nameMatch.index).trim();
+  return returnType.length > 0 ? returnType : undefined;
 }
 
 function tryResolveMemberAccessType(
@@ -1288,12 +1616,17 @@ export function tryResolveTypeFullNameFromTypeString(
 
   normalized = normalized.replace(/[@&]+$/g, "").trim();
 
-  if (index.typeInfoByFullName.has(normalized)) {
+  const shortName = normalized.split("::").pop() ?? normalized;
+  const candidates = index.typeFullNamesByShortName.get(shortName);
+  const directType = index.typeInfoByFullName.get(normalized);
+  if (normalized.includes("::")) {
+    return directType ? normalized : undefined;
+  }
+
+  if (directType && (!candidates || candidates.length === 0)) {
     return normalized;
   }
 
-  const shortName = normalized.split("::").pop() ?? normalized;
-  const candidates = index.typeFullNamesByShortName.get(shortName);
   if (!candidates || candidates.length === 0) {
     return undefined;
   }
@@ -1305,6 +1638,24 @@ export function tryResolveTypeFullNameFromTypeString(
     if (preferred) {
       return preferred;
     }
+  }
+
+  if (directType) {
+    const richerCandidate = candidates.find((candidate) => {
+      if (candidate === normalized) {
+        return false;
+      }
+      const candidateInfo = index.typeInfoByFullName.get(candidate);
+      if (!candidateInfo || candidateInfo.namespace.length === 0) {
+        return false;
+      }
+      return candidateInfo.members.length > directType.members.length;
+    });
+    if (richerCandidate) {
+      return richerCandidate;
+    }
+
+    return normalized;
   }
 
   return candidates[0];

@@ -12,6 +12,7 @@ import {
 } from "vscode-languageserver/node";
 import type { TextDocument } from "vscode-languageserver-textdocument";
 import {
+  collectVisibleUsingNamespacePathsAtOffset,
   DocumentAnalysis,
   FunctionDeclaration,
   IdentifierOccurrence,
@@ -659,16 +660,22 @@ function resolveFunctionTargetAtOccurrence(
     workspaceFunctionDeclarationsByName
   );
 
-  return resolvedNamespacePath === undefined
-    ? {
-        kind: "function",
-        name: occurrence.name
-      }
-    : {
-        kind: "function",
-        name: occurrence.name,
-        namespacePath: resolvedNamespacePath
-      };
+  if (resolvedNamespacePath === undefined) {
+    return declarations.some(
+      (entry) => entry.declaration.namespacePath === ""
+    )
+      ? {
+          kind: "function",
+          name: occurrence.name
+        }
+      : undefined;
+  }
+
+  return {
+    kind: "function",
+    name: occurrence.name,
+    namespacePath: resolvedNamespacePath
+  };
 }
 
 function resolveGlobalDeclarationAtOccurrence(
@@ -955,30 +962,6 @@ function findEnclosingNamespacePathAtOffset(
   return namespacePath;
 }
 
-function collectUsingNamespacePathsBeforeOffset(
-  maskedText: string,
-  offset: number
-): Set<string> {
-  const visibleText = maskedText.slice(0, Math.max(0, offset));
-  const namespaces = new Set<string>();
-  const pattern =
-    /\busing\s+namespace\s+([A-Za-z_][A-Za-z0-9_]*(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)*)\s*;/g;
-
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(visibleText)) !== null) {
-    const namespacePath = match[1]
-      .split("::")
-      .map((segment) => segment.trim())
-      .filter((segment) => segment.length > 0)
-      .join("::");
-    if (namespacePath.length > 0) {
-      namespaces.add(namespacePath);
-    }
-  }
-
-  return namespaces;
-}
-
 function resolveUnqualifiedFunctionNamespacePathForOccurrence(
   analysis: DocumentAnalysis,
   allAnalyses: DocumentAnalysis[],
@@ -1001,18 +984,31 @@ function resolveUnqualifiedFunctionNamespacePathForOccurrence(
   const activeNamespacePath = resolveOccurrenceNamespacePath(analysis, occurrence);
   if (
     declarations.some(
-      (entry) => entry.declaration.namespacePath === activeNamespacePath
+      (entry) =>
+        isSameOrAncestorNamespace(
+          entry.declaration.namespacePath,
+          activeNamespacePath
+        )
     )
   ) {
-    return activeNamespacePath;
+    const matchingAncestors = [
+      ...new Set(
+        declarations
+          .map((entry) => entry.declaration.namespacePath)
+          .filter((namespacePath) =>
+            isSameOrAncestorNamespace(namespacePath, activeNamespacePath)
+          )
+      )
+    ].sort((left, right) => right.length - left.length);
+    return matchingAncestors[0] ?? activeNamespacePath;
   }
 
   if (declarations.some((entry) => entry.declaration.namespacePath === "")) {
     return "";
   }
 
-  const usingNamespacePaths = collectUsingNamespacePathsBeforeOffset(
-    analysis.maskedText,
+  const usingNamespacePaths = collectVisibleUsingNamespacePathsAtOffset(
+    analysis.grammarProgram.declarations,
     occurrence.start
   );
   const visibleNamespaces = [
@@ -1027,6 +1023,22 @@ function resolveUnqualifiedFunctionNamespacePathForOccurrence(
   ];
 
   return visibleNamespaces.length === 1 ? visibleNamespaces[0] : undefined;
+}
+
+function isSameOrAncestorNamespace(
+  candidateNamespacePath: string,
+  activeNamespacePath: string
+): boolean {
+  if (!candidateNamespacePath) {
+    return true;
+  }
+  if (!activeNamespacePath) {
+    return false;
+  }
+  if (candidateNamespacePath === activeNamespacePath) {
+    return true;
+  }
+  return activeNamespacePath.startsWith(`${candidateNamespacePath}::`);
 }
 
 function collectSymbolOccurrences(
@@ -1203,7 +1215,12 @@ function collectSymbolOccurrences(
         }
       }
 
-      if (!occurrence.isCall && !analysis.functionNameDeclarationOffsets.has(occurrence.start)) {
+      const resolvedTarget = resolveSymbolTargetAtOffset(
+        analysis,
+        allAnalyses,
+        occurrence.start
+      );
+      if (!isResolvedFunctionTargetMatch(resolvedTarget, target)) {
         continue;
       }
 
@@ -1220,10 +1237,6 @@ function collectSymbolOccurrences(
         continue;
       }
 
-      if (target.namespacePath === undefined && occurrence.qualifier !== "none") {
-        continue;
-      }
-
       entries.push({
         uri: analysis.uri,
         analysis,
@@ -1233,6 +1246,19 @@ function collectSymbolOccurrences(
   }
 
   return dedupeOccurrences(entries);
+}
+
+function isResolvedFunctionTargetMatch(
+  resolvedTarget: SymbolTarget | undefined,
+  expectedTarget: FunctionSymbolTarget
+): boolean {
+  if (!resolvedTarget || resolvedTarget.kind !== "function") {
+    return false;
+  }
+  if (resolvedTarget.name !== expectedTarget.name) {
+    return false;
+  }
+  return resolvedTarget.namespacePath === expectedTarget.namespacePath;
 }
 
 function doesFunctionOccurrenceMatchTarget(
@@ -1601,7 +1627,10 @@ function formatFunctionSignatureLabel(
   functionName: string,
   argsText: string
 ): string {
-  const normalizedArgs = argsText.trim();
+  const normalizedArgs = argsText
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/\s*,\s*/g, ", ");
   return `${returnType} ${functionName}(${normalizedArgs})`.trim();
 }
 

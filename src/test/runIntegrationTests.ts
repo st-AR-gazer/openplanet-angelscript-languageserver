@@ -211,6 +211,11 @@ class LspProcessClient {
 }
 
 async function main(): Promise<void> {
+  await testIgnoredFenceSuppressesDiagnostics();
+  await testBaselineIntegrationDiagnostics();
+}
+
+async function testBaselineIntegrationDiagnostics(): Promise<void> {
   const workspaceRoot = path.resolve(__dirname, "..", "..");
   const serverModulePath = path.resolve(__dirname, "..", "server.js");
   const client = new LspProcessClient(serverModulePath, workspaceRoot);
@@ -285,6 +290,70 @@ async function main(): Promise<void> {
     );
 
     console.log("Integration tests passed.");
+  } finally {
+    await client.shutdown();
+  }
+}
+
+async function testIgnoredFenceSuppressesDiagnostics(): Promise<void> {
+  const workspaceRoot = path.resolve(__dirname, "..", "..");
+  const serverModulePath = path.resolve(__dirname, "..", "server.js");
+  const client = new LspProcessClient(serverModulePath, workspaceRoot);
+
+  try {
+    await client.request("initialize", {
+      processId: process.pid,
+      rootUri: URI.file(workspaceRoot).toString(),
+      capabilities: {},
+      workspaceFolders: [
+        {
+          uri: URI.file(workspaceRoot).toString(),
+          name: path.basename(workspaceRoot)
+        }
+      ]
+    });
+    client.notify("initialized", {});
+
+    const documentUri = "file:///integration-ignored-fence.as";
+    const source = [
+      "void Main() {",
+      "  ///<",
+      '  Add("bad");',
+      "  ///>",
+      "}",
+      "",
+      "int Add(int value) {",
+      "  return value;",
+      "}"
+    ].join("\n");
+
+    client.notify("textDocument/didOpen", {
+      textDocument: {
+        uri: documentUri,
+        languageId: "openplanet-angelscript",
+        version: 1,
+        text: source
+      }
+    });
+
+    const diagnosticsNotification = (await client.waitForNotification(
+      "textDocument/publishDiagnostics",
+      (params) =>
+        typeof params === "object" &&
+        params !== null &&
+        (params as { uri?: string }).uri === documentUri,
+      15000
+    )) as { diagnostics?: Array<{ code?: string }> };
+
+    const codes = new Set(
+      (diagnosticsNotification.diagnostics ?? []).map((diagnostic) =>
+        String(diagnostic.code ?? "")
+      )
+    );
+    assert.ok(
+      !codes.has("call-argument-type-mismatch"),
+      "Expected diagnostics inside ///< ///> fence to be suppressed."
+    );
   } finally {
     await client.shutdown();
   }

@@ -12,17 +12,68 @@ if (!packageName || !packageVersion) {
   throw new Error("package.json must define name and version.");
 }
 
+function resolveCommand(name) {
+  return process.platform === "win32" ? `${name}.cmd` : name;
+}
+
+function run(command, args, cwd) {
+  const result = spawnSync(resolveCommand(command), args, {
+    cwd,
+    stdio: "inherit",
+    shell: process.platform === "win32"
+  });
+
+  if (result.error) {
+    throw result.error;
+  }
+
+  if (result.status !== 0) {
+    process.exit(result.status ?? 1);
+  }
+}
+
+function prepareCoreDependency() {
+  if (!pkg.dependencies || !("openplanet-angelscript-core" in pkg.dependencies)) {
+    return undefined;
+  }
+
+  const coreDir = path.resolve(workspaceRoot, "..", "openplanet-angelscript-core");
+  run("npm", ["run", "compile"], coreDir);
+
+  const targetDir = path.join(
+    workspaceRoot,
+    "out",
+    "node_modules",
+    "openplanet-angelscript-core"
+  );
+  fs.rmSync(targetDir, { recursive: true, force: true });
+  fs.mkdirSync(targetDir, { recursive: true });
+  fs.copyFileSync(
+    path.join(coreDir, "package.json"),
+    path.join(targetDir, "package.json")
+  );
+  fs.cpSync(path.join(coreDir, "out"), path.join(targetDir, "out"), {
+    recursive: true
+  });
+  return targetDir;
+}
+
 const versionedVsixName = `${packageName}-${packageVersion}.vsix`;
 const stableAliasVsixName = "openplanet-angelscript-languageserver-0.1.2.vsix";
 
-const packageCommand = [
+const packageArgs = [
   "npx",
   "@vscode/vsce",
   "package",
   "--no-yarn",
   "--out",
   versionedVsixName
-].join(" ");
+];
+const preparedCoreDependencyDir = prepareCoreDependency();
+if (preparedCoreDependencyDir) {
+  packageArgs.push("--no-dependencies");
+}
+const packageCommand = packageArgs.join(" ");
 const childEnv = { ...process.env };
 delete childEnv.npm_config_workspace;
 delete childEnv.npm_config_workspaces;
@@ -34,23 +85,29 @@ const shellArgs =
     ? ["/d", "/s", "/c", packageCommand]
     : ["-lc", packageCommand];
 
-const packResult = spawnSync(shellExecutable, shellArgs, {
-  cwd: workspaceRoot,
-  stdio: "inherit",
-  env: childEnv
-});
+try {
+  const packResult = spawnSync(shellExecutable, shellArgs, {
+    cwd: workspaceRoot,
+    stdio: "inherit",
+    env: childEnv
+  });
 
-if (packResult.error) {
-  throw packResult.error;
-}
+  if (packResult.error) {
+    throw packResult.error;
+  }
 
-if (packResult.status !== 0) {
-  process.exit(packResult.status ?? 1);
-}
+  if (packResult.status !== 0) {
+    process.exit(packResult.status ?? 1);
+  }
 
-if (stableAliasVsixName !== versionedVsixName) {
-  const versionedVsixPath = path.join(workspaceRoot, versionedVsixName);
-  const stableAliasVsixPath = path.join(workspaceRoot, stableAliasVsixName);
-  fs.copyFileSync(versionedVsixPath, stableAliasVsixPath);
-  console.log(`Updated stable VSIX alias: ${stableAliasVsixName} -> ${versionedVsixName}`);
+  if (stableAliasVsixName !== versionedVsixName) {
+    const versionedVsixPath = path.join(workspaceRoot, versionedVsixName);
+    const stableAliasVsixPath = path.join(workspaceRoot, stableAliasVsixName);
+    fs.copyFileSync(versionedVsixPath, stableAliasVsixPath);
+    console.log(`Updated stable VSIX alias: ${stableAliasVsixName} -> ${versionedVsixName}`);
+  }
+} finally {
+  if (preparedCoreDependencyDir) {
+    fs.rmSync(preparedCoreDependencyDir, { recursive: true, force: true });
+  }
 }

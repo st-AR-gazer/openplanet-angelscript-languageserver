@@ -40,8 +40,12 @@ import {
   getTypeResolutionContextAtPosition
 } from "./server/analysis";
 import {
+  collectDirectiveCommentSnippetItems,
   collectCompletionItems,
+  collectPreprocessorCompletionItems,
+  collectWorkspaceFunctionCompletionItems,
   createCompletionIndex,
+  dedupeCompletionItems,
   getActiveNamespaceAtPosition,
   resolveCompletionItemDetails
 } from "./server/completions";
@@ -52,6 +56,7 @@ import {
   getSemanticDiagnostics,
   getSyntaxDiagnostics
 } from "./server/diagnostics";
+import { collectPreprocessorDiagnostics } from "./server/preprocessor";
 import { getCodeLensesForDocument } from "./server/codeLenses";
 import {
   getColorPresentations,
@@ -69,6 +74,7 @@ import {
   clearImportValidationCache,
   getImportDiagnostics
 } from "./server/imports";
+import { filterDiagnosticsForIgnoredRegions } from "./server/ignoredRegions";
 import {
   getInlineValuesForRange,
   type InlineValuePayload,
@@ -119,6 +125,7 @@ import type {
 import { uriToFsPath } from "./server/util";
 import {
   buildWorkspaceAnalysisIndex,
+  collectDependencyAngelScriptUrisForPlugin,
   loadWorkspaceDocumentAnalysis
 } from "./server/workspaceIndex";
 
@@ -158,6 +165,10 @@ let workspaceAnalysisBuildGeneration = 0;
 let scopedAnalysisGeneration = 0;
 const includeScopeCache = new Map<string, { generation: number; uris: string[] }>();
 const pluginScopeCache = new Map<
+  string,
+  { generation: number; uris: string[] }
+>();
+const dependencyScopeCache = new Map<
   string,
   { generation: number; uris: string[] }
 >();
@@ -206,7 +217,7 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
     capabilities: {
       textDocumentSync: TextDocumentSyncKind.Incremental,
       completionProvider: {
-        triggerCharacters: [":", "."],
+        triggerCharacters: [":", ".", "/", "#"],
         resolveProvider: true
       },
       hoverProvider: true,
@@ -307,10 +318,36 @@ connection.onCompletion(
     await Promise.all([completionIndexBuildPromise, workspaceAnalysisBuildPromise]);
 
     const document = documents.get(params.textDocument.uri);
+    let scopedAnalyses: DocumentAnalysis[] | undefined;
+    let effectiveCompletionIndex = completionIndex;
     if (document) {
+      const preprocessorItems = collectPreprocessorCompletionItems(
+        document,
+        params.position.line,
+        params.position.character
+      );
+      if (preprocessorItems.length > 0) {
+        return preprocessorItems;
+      }
+
+      const directiveSnippetItems = collectDirectiveCommentSnippetItems(
+        document,
+        params.position.line,
+        params.position.character
+      );
+      if (directiveSnippetItems.length > 0) {
+        return directiveSnippetItems;
+      }
+
       const allAnalyses = await getScopedAnalysesForDocument(document);
+      scopedAnalyses = allAnalyses;
       const scopedReturnTypes = collectFunctionReturnTypes(allAnalyses);
       const analysis = getDocumentAnalysis(document);
+      const workspaceTypeCatalog = collectWorkspaceTypeCatalog(allAnalyses);
+      effectiveCompletionIndex = createWorkspaceTypeAwareIndex(
+        completionIndex,
+        workspaceTypeCatalog.byFullName
+      );
 
       const dotContext = getDotCompletionContext(
         document,
@@ -319,11 +356,6 @@ connection.onCompletion(
       );
 
       if (dotContext) {
-        const workspaceTypeCatalog = collectWorkspaceTypeCatalog(allAnalyses);
-        const effectiveIndex = createWorkspaceTypeAwareIndex(
-          completionIndex,
-          workspaceTypeCatalog.byFullName
-        );
         const typeContext = getTypeResolutionContextAtPosition(
           document,
           analysis,
@@ -331,16 +363,16 @@ connection.onCompletion(
           params.position.character,
           allAnalyses,
           scopedReturnTypes,
-          effectiveIndex
+          effectiveCompletionIndex
         );
         const receiverTypeFullName = tryResolveExpressionTypeFullName(
-          effectiveIndex,
+          effectiveCompletionIndex,
           dotContext.receiverText,
           typeContext
         );
         if (receiverTypeFullName) {
           const memberItems = collectMemberCompletionItems(
-            effectiveIndex,
+            effectiveCompletionIndex,
             receiverTypeFullName,
             dotContext.memberPrefix
           );
@@ -360,14 +392,18 @@ connection.onCompletion(
       : undefined;
 
     const items = collectCompletionItems(
-      completionIndex,
+      effectiveCompletionIndex,
       activeNamespace,
       settings.completion.shortcuts
     );
+    const workspaceItems = scopedAnalyses
+      ? collectWorkspaceFunctionCompletionItems(scopedAnalyses, activeNamespace)
+      : [];
+    const mergedItems = dedupeCompletionItems([...workspaceItems, ...items]);
     if (activeNamespace) {
-      return items;
+      return mergedItems;
     }
-    return sliceToMaxItems(items);
+    return sliceToMaxItems(mergedItems);
   }
 );
 
@@ -1108,6 +1144,7 @@ async function validateTextDocument(
   maybeLogParserDebugOutput(document, analysis);
   maybeCrashOnParserError(document, analysis);
   diagnostics.push(...getSyntaxDiagnostics(document, analysis, settings.parser));
+  diagnostics.push(...collectPreprocessorDiagnostics(document));
 
   if (settings.imports.enable) {
     const importDiagnostics = await getImportDiagnostics(
@@ -1133,7 +1170,11 @@ async function validateTextDocument(
         return;
       }
 
-      publishDiagnostics(targetUri, targetVersion, diagnostics);
+      publishDiagnostics(
+        targetUri,
+        targetVersion,
+        filterDiagnosticsForIgnoredRegions(document, diagnostics)
+      );
       return;
     }
 
@@ -1156,7 +1197,11 @@ async function validateTextDocument(
     return;
   }
 
-  publishDiagnostics(targetUri, targetVersion, diagnostics);
+  publishDiagnostics(
+    targetUri,
+    targetVersion,
+    filterDiagnosticsForIgnoredRegions(document, diagnostics)
+  );
 }
 
 function isCompletionIndexReadyForCurrentSettings(): boolean {
@@ -1207,6 +1252,7 @@ function rebuildWorkspaceFunctionIndexes(): void {
   scopedAnalysisGeneration += 1;
   includeScopeCache.clear();
   pluginScopeCache.clear();
+  dependencyScopeCache.clear();
 
   const analysesByUri = new Map<string, DocumentAnalysis>();
   for (const [uri, analysis] of workspaceAnalysisCache.entries()) {
@@ -1337,6 +1383,11 @@ async function getScopedAnalysesByUri(
     visited.add(uri);
   }
 
+  const dependencyScopedUris = await getDependencyScopedUris(rootUri);
+  for (const uri of dependencyScopedUris) {
+    visited.add(uri);
+  }
+
   const scopedUris = [...visited].sort((a, b) => a.localeCompare(b));
   includeScopeCache.set(rootUri, {
     generation: scopedAnalysisGeneration,
@@ -1391,6 +1442,75 @@ async function getPluginScopedUris(rootUri: string): Promise<string[]> {
   const logger = connection.console as unknown as Logger;
   let changed = false;
 
+  for (const uri of scopedUris) {
+    if (analysisCache.has(uri) || workspaceAnalysisCache.has(uri)) {
+      continue;
+    }
+
+    const analysis = await loadWorkspaceDocumentAnalysis(uri, logger);
+    if (!analysis) {
+      continue;
+    }
+
+    workspaceAnalysisCache.set(uri, analysis);
+    changed = true;
+  }
+
+  if (changed) {
+    rebuildWorkspaceFunctionIndexes();
+  }
+
+  return scopedUris;
+}
+
+async function getDependencyScopedUris(rootUri: string): Promise<string[]> {
+  if (!settings.dependencies.enableInfoTomlDependencies) {
+    return [];
+  }
+
+  let rootPath: string;
+  try {
+    rootPath = uriToFsPath(rootUri);
+  } catch {
+    return [];
+  }
+
+  const pluginRootPath = await findNearestPluginRootPath(rootPath);
+  if (!pluginRootPath) {
+    return [];
+  }
+
+  const normalizedPluginRoot = normalizePathForCompare(pluginRootPath);
+  const cached = dependencyScopeCache.get(normalizedPluginRoot);
+  if (cached && cached.generation === scopedAnalysisGeneration) {
+    return cached.uris;
+  }
+
+  const logger = connection.console as unknown as Logger;
+  const scopedUris = await collectDependencyAngelScriptUrisForPlugin(
+    pluginRootPath,
+    workspaceRoots,
+    {
+      enableInfoTomlDependencies: settings.dependencies.enableInfoTomlDependencies,
+      includeOptionalDependencies: settings.dependencies.includeOptionalDependencies,
+      pluginRoots: settings.dependencies.pluginRoots,
+      symbolsBaseUserFolderPath: settings.symbols.baseUserFolderPath,
+      maxDepth: settings.dependencies.maxDepth,
+      maxFiles: settings.dependencies.maxFiles
+    },
+    logger
+  );
+
+  dependencyScopeCache.set(normalizedPluginRoot, {
+    generation: scopedAnalysisGeneration,
+    uris: scopedUris
+  });
+
+  if (scopedUris.length === 0) {
+    return scopedUris;
+  }
+
+  let changed = false;
   for (const uri of scopedUris) {
     if (analysisCache.has(uri) || workspaceAnalysisCache.has(uri)) {
       continue;

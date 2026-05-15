@@ -1,4 +1,9 @@
 import type { CompletionItem } from "vscode-languageserver/node";
+import type {
+  SemanticTypeKind,
+  SemanticSymbolSource,
+  SemanticTypeRegistry
+} from "openplanet-angelscript-core";
 
 export interface CompletionShortcutSettings {
   math: boolean;
@@ -124,14 +129,18 @@ export interface TypeInfo {
   fullName: string;
   shortName: string;
   namespace: string;
+  kind?: SemanticTypeKind;
+  source?: SemanticSymbolSource;
   parentShortName?: string;
   members: TypeMemberInfo[];
+  enumMembers?: string[];
 }
 
 export interface CompletionIndex {
   global: CompletionBucket;
   namespaceBuckets: Map<string, CompletionBucket>;
   namespaceChildren: Map<string, Set<string>>;
+  semanticTypes: SemanticTypeRegistry;
   typeInfoByFullName: Map<string, TypeInfo>;
   typeFullNamesByShortName: Map<string, string[]>;
   gameTypeFullNames: Set<string>;

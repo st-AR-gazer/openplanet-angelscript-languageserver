@@ -83,6 +83,7 @@ export interface IncludeDirective {
 
 export interface ImportFunctionDeclaration {
   id: string;
+  namespacePath: string;
   statementStart: number;
   statementEnd: number;
   statementRange: Range;
@@ -238,6 +239,7 @@ export function analyzeDocument(document: TextDocument): DocumentAnalysis {
   const importFunctionDeclarations = parseImportFunctionDeclarations(
     text,
     parsedStructure.callableDeclarations,
+    grammar.program,
     document
   );
   const typeDeclarations = parseTypeDeclarationsFromGrammarProgram(
@@ -256,6 +258,7 @@ export function analyzeDocument(document: TextDocument): DocumentAnalysis {
     text
   );
   const functions = parseFunctions(
+    text,
     maskedText,
     parsedStructure.functions,
     grammarFunctions,
@@ -328,6 +331,41 @@ export function analyzeDocument(document: TextDocument): DocumentAnalysis {
   };
 }
 
+export function collectVisibleUsingNamespacePathsAtOffset(
+  declarations: readonly GrammarDeclarationNode[],
+  offset: number
+): Set<string> {
+  const visible = new Set<string>();
+  collectVisibleUsingNamespacePathsRecursive(declarations, offset, visible);
+  return visible;
+}
+
+function findEnclosingNamespacePathAtOffset(
+  declarations: readonly GrammarDeclarationNode[],
+  offset: number,
+  namespacePath: string
+): string {
+  for (const declaration of declarations) {
+    if (declaration.kind !== "namespace") {
+      continue;
+    }
+    if (offset < declaration.start || offset > declaration.end) {
+      continue;
+    }
+
+    const childNamespacePath = namespacePath
+      ? `${namespacePath}::${declaration.name}`
+      : declaration.name;
+    return findEnclosingNamespacePathAtOffset(
+      declaration.body,
+      offset,
+      childNamespacePath
+    );
+  }
+
+  return namespacePath;
+}
+
 function parseIncludeDirectives(
   text: string,
   document: TextDocument
@@ -357,9 +395,53 @@ function parseIncludeDirectives(
   return includes;
 }
 
+function collectVisibleUsingNamespacePathsRecursive(
+  declarations: readonly GrammarDeclarationNode[],
+  offset: number,
+  visible: Set<string>
+): void {
+  for (const declaration of declarations) {
+    if (declaration.start > offset) {
+      break;
+    }
+
+    if (declaration.kind === "using") {
+      if (declaration.end <= offset) {
+        const normalizedPath = normalizeNamespacePath(declaration.namespacePath);
+        if (normalizedPath.length > 0) {
+          visible.add(normalizedPath);
+        }
+      }
+      continue;
+    }
+
+    if (
+      (declaration.kind === "namespace" || declaration.kind === "type") &&
+      offset >= declaration.start &&
+      offset <= declaration.end
+    ) {
+      collectVisibleUsingNamespacePathsRecursive(
+        declaration.body,
+        offset,
+        visible
+      );
+      break;
+    }
+  }
+}
+
+function normalizeNamespacePath(value: string): string {
+  return value
+    .split("::")
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0)
+    .join("::");
+}
+
 function parseImportFunctionDeclarations(
   text: string,
   parsedCallables: ParsedCallableDeclarationNode[],
+  grammarProgram: GrammarProgramNode,
   document: TextDocument
 ): ImportFunctionDeclaration[] {
   const declarations: ImportFunctionDeclaration[] = [];
@@ -410,9 +492,15 @@ function parseImportFunctionDeclarations(
         .trimStart();
     }
     const returnType = normalizeTypeText(normalizedPrefix) || "void";
+    const namespacePath = findEnclosingNamespacePathAtOffset(
+      grammarProgram.declarations,
+      parsedCallable.statementStart,
+      ""
+    );
 
     declarations.push({
       id: `${document.uri}:import:${functionNameStart}`,
+      namespacePath,
       statementStart: parsedCallable.statementStart,
       statementEnd: parsedCallable.statementEnd,
       statementRange: offsetsToRange(
@@ -732,6 +820,13 @@ export function collectFunctionReturnTypes(
       if (!returnTypes.has(fn.name)) {
         returnTypes.set(fn.name, fn.returnType);
       }
+
+      if (fn.namespacePath) {
+        const qualifiedName = `${fn.namespacePath}::${fn.name}`;
+        if (!returnTypes.has(qualifiedName)) {
+          returnTypes.set(qualifiedName, fn.returnType);
+        }
+      }
     }
   }
 
@@ -921,6 +1016,7 @@ function findFutureDeclarationInScope(
 }
 
 function parseFunctions(
+  text: string,
   maskedText: string,
   nodes: ParsedFunctionNode[],
   grammarFunctions: GrammarFunctionWithNamespace[],
@@ -943,7 +1039,8 @@ function parseFunctions(
   }
 
   for (const node of nodes) {
-    const argsText = maskedText.slice(node.openParen + 1, node.closeParen);
+    const argsText = text.slice(node.openParen + 1, node.closeParen);
+    const maskedArgsText = maskedText.slice(node.openParen + 1, node.closeParen);
     const grammarFunctionWithNamespace = grammarFunctionByBodyRange.get(
       `${node.openBrace}:${node.closeBrace}`
     );
@@ -957,7 +1054,7 @@ function parseFunctions(
     const blockRanges = buildBlockRanges(maskedText, node.openBrace, node.closeBrace);
     const fallbackParameters = parseParameters(
       document,
-      argsText,
+      maskedArgsText,
       node.openParen + 1,
       node.openBrace + 1,
       node.closeBrace

@@ -1,4 +1,18 @@
-import { CompletionItemKind } from "vscode-languageserver/node";
+import {
+  descriptorToTypeText as coreDescriptorToTypeText,
+  evaluateConversion as evaluateCoreConversion,
+  canonicalNumericType,
+  isBoolTypeName,
+  isIntegerTypeName,
+  isNumericTypeName,
+  isPrimitiveTypeName,
+  isTextStringTypeName,
+  isWideStringTypeName,
+  parseTypeDescriptor as parseCoreTypeDescriptor,
+  type ConversionResult,
+  type TypeCompatibility,
+  type TypeDescriptor
+} from "openplanet-angelscript-core";
 import { isIntrinsicCallableIdentifier, normalizeTypeText } from "./language";
 import {
   findResolvedMember,
@@ -10,8 +24,6 @@ import {
   angelScriptReservedKeywords
 } from "./angelScriptTokenTables.generated";
 import type { CompletionIndex } from "./types";
-
-export type TypeCompatibility = "compatible" | "incompatible" | "unknown";
 
 export interface ParsedCallableParameter {
   rawText: string;
@@ -58,26 +70,6 @@ interface CandidateScore {
   variadicUsageCount: number;
   specificityScore: number;
   templateBindings: Map<string, TypeDescriptor>;
-}
-
-interface ConversionResult {
-  status: TypeCompatibility;
-  cost: number;
-}
-
-interface TypeDescriptor {
-  raw: string;
-  normalized: string;
-  base: string;
-  shortBase: string;
-  genericArgs: TypeDescriptor[];
-  isConst: boolean;
-  isHandle: boolean;
-  isReference: boolean;
-  isNull: boolean;
-  isTemplateParameter: boolean;
-  isAny: boolean;
-  isPrimitive: boolean;
 }
 
 type ExpressionNode =
@@ -675,7 +667,11 @@ function scoreCallableCandidate(
       unknownCount += 1;
       continue;
     }
-    if (!expected.isAny && !expected.isTemplateParameter) {
+    if (
+      !expected.isAny &&
+      !expected.isTemplateParameter &&
+      !expected.isGenericReference
+    ) {
       specificityScore += 1;
     }
 
@@ -869,24 +865,17 @@ function resolveQualifiedEnumValueType(
     tryResolveTypeFullNameFromTypeString(index, enumTypeName) ?? enumTypeName;
 
   if (isEnumTypeName(index, resolvedEnumTypeName)) {
-    const bucket = index.namespaceBuckets.get(resolvedEnumTypeName);
-    if (!bucket) {
-      return undefined;
+    const enumMembers =
+      index.semanticTypes.get(resolvedEnumTypeName)?.enumMembers ??
+      index.typeInfoByFullName.get(resolvedEnumTypeName)?.enumMembers ??
+      [];
+    if (enumMembers.length === 0) {
+      return /^[A-Z][A-Za-z0-9_]*$/.test(enumMemberName)
+        ? resolvedEnumTypeName
+        : undefined;
     }
 
-    for (const item of bucket.items) {
-      if (item.label !== enumMemberName) {
-        continue;
-      }
-      if (
-        item.kind === CompletionItemKind.EnumMember ||
-        (typeof item.detail === "string" && item.detail.startsWith("Enum value"))
-      ) {
-        return resolvedEnumTypeName;
-      }
-    }
-
-    return undefined;
+    return enumMembers.includes(enumMemberName) ? resolvedEnumTypeName : undefined;
   }
 
   const resolvedEnumTypeInfo = index.typeInfoByFullName.get(resolvedEnumTypeName);
@@ -1576,223 +1565,31 @@ function evaluateConversion(
   templateBindings: Map<string, TypeDescriptor>,
   recursionDepth = 0
 ): ConversionResult {
-  if (expected.isAny) {
-    return { status: "compatible", cost: 6 };
-  }
-
-  if (!actual) {
-    return expected.isPrimitive
-      ? { status: "incompatible", cost: 0 }
-      : { status: "unknown", cost: 0 };
-  }
-
-  if (expected.isTemplateParameter) {
-    const existing = templateBindings.get(expected.base);
-    if (!existing) {
-      templateBindings.set(expected.base, actual);
-      return { status: "compatible", cost: 0 };
-    }
-
-    return evaluateConversion(index, existing, actual, templateBindings, recursionDepth);
-  }
-
-  if (actual.isAny || actual.isTemplateParameter) {
-    return { status: "unknown", cost: 0 };
-  }
-
-  if (
-    actual.isConst &&
-    !expected.isConst &&
-    (expected.isHandle || expected.isReference)
-  ) {
-    return { status: "incompatible", cost: 0 };
-  }
-
-  if (actual.isNull) {
-    if (expected.isHandle) {
-      return { status: "compatible", cost: 1 };
-    }
-    return { status: "incompatible", cost: 0 };
-  }
-
-  if (expected.isHandle !== actual.isHandle) {
-    if (expected.isHandle && !actual.isHandle) {
-      const expectedValueDescriptor: TypeDescriptor = {
-        ...expected,
-        isHandle: false
-      };
-      const valueConversion = evaluateConversion(
-        index,
-        expectedValueDescriptor,
-        actual,
-        templateBindings,
-        recursionDepth + 1
-      );
-      if (valueConversion.status === "compatible") {
-        return { status: "compatible", cost: valueConversion.cost + 1 };
-      }
-      if (valueConversion.status === "unknown") {
-        return valueConversion;
-      }
-    }
-    if (!expected.isHandle && actual.isHandle) {
-      const actualValueDescriptor: TypeDescriptor = {
-        ...actual,
-        isHandle: false
-      };
-      const valueConversion = evaluateConversion(
-        index,
-        expected,
-        actualValueDescriptor,
-        templateBindings,
-        recursionDepth + 1
-      );
-      if (valueConversion.status === "compatible") {
-        return { status: "compatible", cost: valueConversion.cost + 1 };
-      }
-      if (valueConversion.status === "unknown") {
-        return valueConversion;
-      }
-    }
-
-    const userDefinedConversion = tryResolveUserDefinedConversion(
-      index,
-      expected,
-      actual,
-      templateBindings,
-      recursionDepth
-    );
-    if (userDefinedConversion) {
-      return userDefinedConversion;
-    }
-    return { status: "incompatible", cost: 0 };
-  }
-
-  if (areDescriptorsEquivalent(index, expected, actual)) {
-    return { status: "compatible", cost: 0 };
-  }
-
-  if (isNumericTypeName(expected.normalized) && isNumericTypeName(actual.normalized)) {
-    return {
-      status: "compatible",
-      cost: numericConversionCost(expected.normalized, actual.normalized)
-    };
-  }
-
-  if (
-    (isIntegerTypeName(expected.normalized) && isEnumTypeDescriptor(index, actual)) ||
-    (isEnumTypeDescriptor(index, expected) && isIntegerTypeName(actual.normalized))
-  ) {
-    return { status: "compatible", cost: 2 };
-  }
-
-  if (isBoolTypeName(expected.normalized)) {
-    return expected.shortBase === actual.shortBase
-      ? { status: "compatible", cost: 0 }
-      : { status: "incompatible", cost: 0 };
-  }
-
-  if (isTextStringTypeName(expected.normalized)) {
-    if (!isTextStringTypeName(actual.normalized)) {
-      return { status: "incompatible", cost: 0 };
-    }
-
-    return {
-      status: "compatible",
-      cost: expected.shortBase === actual.shortBase ? 0 : 1
-    };
-  }
-
-  if (expected.isPrimitive && actual.isPrimitive) {
-    return { status: "incompatible", cost: 0 };
-  }
-
-  if (
-    expected.genericArgs.length > 0 &&
-    actual.genericArgs.length > 0 &&
-    areBaseTypesEquivalent(index, expected, actual) &&
-    expected.genericArgs.length === actual.genericArgs.length
-  ) {
-    let totalCost = 0;
-    for (let i = 0; i < expected.genericArgs.length; i += 1) {
-      const conversion = evaluateConversion(
-        index,
-        expected.genericArgs[i],
-        actual.genericArgs[i],
-        templateBindings,
-        recursionDepth
-      );
-      if (conversion.status === "incompatible") {
-        return conversion;
-      }
-      if (conversion.status === "unknown") {
-        return conversion;
-      }
-      totalCost += conversion.cost;
-    }
-
-    return { status: "compatible", cost: totalCost };
-  }
-
-  const expectedFullName = resolveTypeFullName(index, expected.normalized);
-  const actualFullName = resolveTypeFullName(index, actual.normalized);
-  if (expectedFullName && actualFullName) {
-    if (expectedFullName === actualFullName) {
-      return { status: "compatible", cost: 0 };
-    }
-
-    const inheritanceDistance = getInheritanceDistance(index, actualFullName, expectedFullName);
-    if (inheritanceDistance !== undefined) {
-      return { status: "compatible", cost: 1 + inheritanceDistance };
-    }
-
-    return { status: "incompatible", cost: 0 };
-  }
-
-  const userDefinedConversion = tryResolveUserDefinedConversion(
-    index,
+  return evaluateCoreConversion(
+    index.semanticTypes,
     expected,
     actual,
     templateBindings,
-    recursionDepth
+    {
+      recursionDepth,
+      getInheritanceDistance: (childFullName, ancestorFullName) =>
+        getInheritanceDistance(index, childFullName, ancestorFullName),
+      tryUserDefinedConversion: (request) =>
+        tryResolveUserDefinedConversion(
+          index,
+          request.expected,
+          request.actual,
+          request.templateBindings,
+          request.recursionDepth
+        )
+    }
   );
-  if (userDefinedConversion) {
-    return userDefinedConversion;
-  }
-
-  if (expected.isPrimitive !== actual.isPrimitive) {
-    return { status: "incompatible", cost: 0 };
-  }
-
-  if (expected.shortBase === actual.shortBase) {
-    return { status: "compatible", cost: 1 };
-  }
-
-  return { status: "unknown", cost: 0 };
-}
-
-function isEnumTypeDescriptor(
-  index: CompletionIndex,
-  descriptor: TypeDescriptor
-): boolean {
-  const fullName = resolveTypeFullName(index, descriptor.normalized);
-  if (!fullName) {
-    return false;
-  }
-
-  return isEnumTypeName(index, fullName);
 }
 
 function isEnumTypeName(index: CompletionIndex, fullName: string): boolean {
-  const bucket = index.namespaceBuckets.get(fullName);
-  if (!bucket) {
-    return false;
-  }
-
-  return bucket.items.some(
-    (item) =>
-      item.kind === CompletionItemKind.EnumMember ||
-      (typeof item.detail === "string" && item.detail.startsWith("Enum value"))
+  return (
+    index.semanticTypes.get(fullName)?.kind === "enum" ||
+    index.typeInfoByFullName.get(fullName)?.kind === "enum"
   );
 }
 
@@ -2005,112 +1802,14 @@ function parseTypeDescriptor(
   typeText: string | undefined,
   index?: CompletionIndex
 ): TypeDescriptor | undefined {
-  if (!typeText) {
-    return undefined;
-  }
-
-  let isConst = /\bconst\b/i.test(typeText);
-  let normalized = normalizeTypeText(typeText).trim();
-  if (!normalized) {
-    return undefined;
-  }
-
-  if (normalized === "null") {
-    return {
-      raw: typeText,
-      normalized,
-      base: "null",
-      shortBase: "null",
-      genericArgs: [],
-      isConst: false,
-      isHandle: false,
-      isReference: false,
-      isNull: true,
-      isTemplateParameter: false,
-      isAny: false,
-      isPrimitive: false
-    };
-  }
-
-  normalized = normalized
-    .replace(/\b(?:in|out|inout)\b/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  while (normalized.startsWith("const ")) {
-    isConst = true;
-    normalized = normalized.slice("const ".length).trimStart();
-  }
-  while (normalized.endsWith(" const")) {
-    isConst = true;
-    normalized = normalized.slice(0, -(" const".length)).trimEnd();
-  }
-
-  let isHandle = false;
-  let isReference = false;
-  while (normalized.endsWith("@") || normalized.endsWith("&")) {
-    if (normalized.endsWith("@")) {
-      isHandle = true;
-      normalized = normalized.slice(0, -1).trimEnd();
-      continue;
-    }
-    if (normalized.endsWith("&")) {
-      isReference = true;
-      normalized = normalized.slice(0, -1).trimEnd();
-      continue;
-    }
-  }
-
-  const genericOpen = findTopLevelChar(normalized, "<");
-  let base = normalized;
-  let genericArgs: TypeDescriptor[] = [];
-  if (genericOpen >= 0 && normalized.endsWith(">")) {
-    base = normalized.slice(0, genericOpen).trim();
-    const inner = normalized.slice(genericOpen + 1, -1);
-    genericArgs = splitTopLevelByComma(inner)
-      .map((part) => parseTypeDescriptor(part, index))
-      .filter((value): value is TypeDescriptor => value !== undefined);
-  }
-
-  let resolvedBase = base;
-  if (
-    index &&
-    resolvedBase.includes("::") &&
-    !tryResolveTypeFullNameFromTypeString(index, resolvedBase)
-  ) {
-    const prefix = resolvedBase.slice(0, resolvedBase.lastIndexOf("::"));
-    if (prefix && tryResolveTypeFullNameFromTypeString(index, prefix)) {
-      resolvedBase = prefix;
-    }
-  }
-
-  const shortBase = (resolvedBase.split("::").pop() ?? resolvedBase).toLowerCase();
-  const resolvesToKnownType =
-    !!index && !!tryResolveTypeFullNameFromTypeString(index, resolvedBase);
-  const isTemplateParameter =
-    /^[A-Z][A-Za-z0-9_]*$/.test(resolvedBase) &&
-    !resolvedBase.includes("::") &&
-    !resolvesToKnownType;
-  const isAny = shortBase === "auto" || shortBase === "var" || shortBase === "?";
-
-  return {
-    raw: typeText,
-    normalized,
-    base: resolvedBase,
-    shortBase,
-    genericArgs,
-    isConst,
-    isHandle,
-    isReference,
-    isNull: false,
-    isTemplateParameter,
-    isAny,
-    isPrimitive: isPrimitiveTypeName(normalized)
-  };
+  return parseCoreTypeDescriptor(typeText, index?.semanticTypes);
 }
 
 function resolveKnownTypeName(index: CompletionIndex, typeName: string): string | undefined {
   const normalized = normalizeTypeText(typeName).trim();
+  if (isGenericReferenceTypeName(normalized)) {
+    return normalized;
+  }
   if (isPrimitiveTypeName(normalized)) {
     return normalized;
   }
@@ -2172,77 +1871,11 @@ function applyTemplateBindingsToType(
 }
 
 function descriptorToTypeText(descriptor: TypeDescriptor): string {
-  const genericSuffix =
-    descriptor.genericArgs.length > 0
-      ? `<${descriptor.genericArgs.map((value) => descriptorToTypeText(value)).join(", ")}>`
-      : "";
-
-  let result = `${descriptor.base}${genericSuffix}`;
-  if (descriptor.isConst) {
-    result = `const ${result}`;
-  }
-  if (descriptor.isHandle) {
-    result += "@";
-  }
-  if (descriptor.isReference) {
-    result += "&";
-  }
-  return result;
+  return coreDescriptorToTypeText(descriptor);
 }
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function numericConversionCost(expectedType: string, actualType: string): number {
-  const expected = canonicalNumericType(expectedType);
-  const actual = canonicalNumericType(actualType);
-  if (expected === actual) {
-    return 0;
-  }
-
-  if (
-    (expected === "float" || expected === "double") &&
-    (actual === "float" || actual === "double")
-  ) {
-    if (expected === "double" && actual === "float") {
-      return 1;
-    }
-    if (expected === "float" && actual === "double") {
-      return 5;
-    }
-  }
-
-  if ((expected === "float" || expected === "double") && isIntegerTypeName(actual)) {
-    return expected === "double" ? 2 : 3;
-  }
-  if (isIntegerTypeName(expected) && (actual === "float" || actual === "double")) {
-    return 6;
-  }
-
-  const expectedRank = numericRank.get(expected) ?? 0;
-  const actualRank = numericRank.get(actual) ?? 0;
-  const expectedSigned = expected.startsWith("int");
-  const actualSigned = actual.startsWith("int");
-  if (expectedRank >= actualRank && expectedSigned === actualSigned) {
-    return 1 + (expectedRank - actualRank);
-  }
-  if (expectedRank >= actualRank) {
-    return 2 + (expectedRank - actualRank);
-  }
-
-  return 4 + (actualRank - expectedRank);
-}
-
-function canonicalNumericType(typeName: string): string {
-  const short = normalizeShortTypeName(typeName);
-  if (short === "int32") {
-    return "int";
-  }
-  if (short === "uint32") {
-    return "uint";
-  }
-  return short;
 }
 
 function promoteNumericType(
@@ -2277,68 +1910,12 @@ function promoteNumericType(
   return "int";
 }
 
-function isPrimitiveTypeName(typeName: string | undefined): boolean {
+function isGenericReferenceTypeName(typeName: string | undefined): boolean {
   if (!typeName) {
     return false;
   }
 
-  return (
-    isBoolTypeName(typeName) ||
-    isTextStringTypeName(typeName) ||
-    isNumericTypeName(typeName)
-  );
-}
-
-function isBoolTypeName(typeName: string | undefined): boolean {
-  if (!typeName) {
-    return false;
-  }
-  return normalizeShortTypeName(typeName) === "bool";
-}
-
-function isStringTypeName(typeName: string | undefined): boolean {
-  if (!typeName) {
-    return false;
-  }
-  return normalizeShortTypeName(typeName) === "string";
-}
-
-function isWideStringTypeName(typeName: string | undefined): boolean {
-  if (!typeName) {
-    return false;
-  }
-  return normalizeShortTypeName(typeName) === "wstring";
-}
-
-function isTextStringTypeName(typeName: string | undefined): boolean {
-  return isStringTypeName(typeName) || isWideStringTypeName(typeName);
-}
-
-function isNumericTypeName(typeName: string | undefined): boolean {
-  if (!typeName) {
-    return false;
-  }
-
-  const short = canonicalNumericType(typeName);
-  return numericRank.has(short);
-}
-
-function isIntegerTypeName(typeName: string | undefined): boolean {
-  if (!typeName) {
-    return false;
-  }
-
-  const short = canonicalNumericType(typeName);
-  return (
-    short === "int8" ||
-    short === "uint8" ||
-    short === "int16" ||
-    short === "uint16" ||
-    short === "int" ||
-    short === "uint" ||
-    short === "int64" ||
-    short === "uint64"
-  );
+  return normalizeShortTypeName(typeName) === "ref";
 }
 
 function normalizeShortTypeName(typeName: string): string {

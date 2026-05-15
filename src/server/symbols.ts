@@ -45,6 +45,13 @@ const gameDefinitions: GameDefinition[] = [
   }
 ];
 
+const alwaysAvailableNamespaces = [
+  "Controls",
+  "Camera",
+  "VehicleState",
+  "NadeoServices"
+];
+
 export async function buildCompletionIndex(
   desiredSettings: OpenplanetLanguageServerSettings,
   logger: Logger
@@ -54,7 +61,10 @@ export async function buildCompletionIndex(
     desiredSettings.symbols.baseUserFolderPath
   );
 
-  for (const namespaceName of desiredSettings.completion.namespaces) {
+  for (const namespaceName of new Set([
+    ...alwaysAvailableNamespaces,
+    ...desiredSettings.completion.namespaces
+  ])) {
     registerNamespacePath(index, namespaceName);
   }
 
@@ -136,9 +146,14 @@ async function loadCoreSymbolsFromJson(
 
     const decl = readString(entry.decl);
     if (decl) {
-      const returnType = parseReturnTypeFromDecl(decl, name);
-      if (isGlobalNamespace && returnType) {
-        index.coreFunctionReturnTypes.set(name, returnType);
+      const returnType =
+        parseReturnTypeFromDecl(decl, qualifiedName) ??
+        parseReturnTypeFromDecl(decl, name);
+      if (returnType) {
+        index.coreFunctionReturnTypes.set(qualifiedName, returnType);
+        if (isGlobalNamespace) {
+          index.coreFunctionReturnTypes.set(name, returnType);
+        }
       }
 
       if (isGlobalNamespace) {
@@ -222,7 +237,7 @@ async function loadCoreSymbolsFromJson(
     const fullName =
       namespaceName && namespaceName.length > 0 ? `${namespaceName}::${name}` : name;
 
-    registerNamedTypeInfo(index, fullName);
+    registerNamedTypeInfo(index, fullName, "funcdef", "openplanet-core-json");
 
     if (!namespaceName || namespaceName.length === 0) {
       index.coreGlobalFuncdefNames.add(name);
@@ -247,7 +262,14 @@ async function loadCoreSymbolsFromJson(
         ? `${namespaceName}::${enumName}`
         : enumName;
 
-    registerNamedTypeInfo(index, enumScopeName);
+    const values = toRecord(entry.values);
+    registerNamedTypeInfo(
+      index,
+      enumScopeName,
+      "enum",
+      "openplanet-core-json",
+      Object.keys(values)
+    );
     registerNamespacePath(index, enumScopeName);
 
     if (!namespaceName || namespaceName.length === 0) {
@@ -260,7 +282,6 @@ async function loadCoreSymbolsFromJson(
       documentation: readString(entry.desc)
     });
 
-    const values = toRecord(entry.values);
     for (const valueName of Object.keys(values)) {
       if (!namespaceName || namespaceName.length === 0) {
         index.coreGlobalValueNames.add(valueName);
@@ -398,9 +419,63 @@ async function loadHeaderSymbolsFromHeader(
     registerNamespacePath(index, namespaceMatch[1]);
   }
 
-  const typePattern = /\b(?:struct|class)\s+([A-Za-z_][A-Za-z0-9_]*)\b/g;
+  const headerWithoutComments = stripHeaderComments(raw);
+  const enumPattern =
+    /\benum(?:\s+class)?\s+([A-Za-z_][A-Za-z0-9_:]*)(?:\s*:\s*[A-Za-z_][A-Za-z0-9_:<>]*)?\s*\{([\s\S]*?)\}\s*;/g;
+  let enumMatch: RegExpExecArray | null;
+  while ((enumMatch = enumPattern.exec(headerWithoutComments)) !== null) {
+    const enumFullName = enumMatch[1];
+    const enumMembers = collectHeaderEnumMembers(enumMatch[2] ?? "");
+    const splitIndex = enumFullName.lastIndexOf("::");
+    const namespaceName =
+      splitIndex >= 0 ? enumFullName.slice(0, splitIndex) : undefined;
+    const enumName =
+      splitIndex >= 0 ? enumFullName.slice(splitIndex + 2) : enumFullName;
+
+    registerNamedTypeInfo(
+      index,
+      enumFullName,
+      "enum",
+      "openplanet-header",
+      enumMembers
+    );
+    registerNamespacePath(index, enumFullName);
+
+    if (!namespaceName) {
+      index.coreGlobalValueNames.add(enumName);
+    }
+
+    addSymbol(index, namespaceName, {
+      label: enumName,
+      kind: CompletionItemKind.Enum,
+      detail: "Openplanet header enum"
+    });
+
+    for (const enumMember of enumMembers) {
+      if (!namespaceName) {
+        index.coreGlobalValueNames.add(enumMember);
+      }
+
+      addSymbol(index, enumFullName, {
+        label: enumMember,
+        kind: CompletionItemKind.EnumMember,
+        detail: `Enum value (${enumName})`
+      });
+    }
+  }
+
+  const typePattern =
+    /\b(?:struct|class)\s+([A-Za-z_][A-Za-z0-9_:]*)(?:\s*:\s*(?:(?:public|protected|private)\s+)?([A-Za-z_][A-Za-z0-9_:]*))?/g;
   let typeMatch: RegExpExecArray | null;
-  while ((typeMatch = typePattern.exec(raw)) !== null) {
+  while ((typeMatch = typePattern.exec(headerWithoutComments)) !== null) {
+    registerNamedTypeInfo(
+      index,
+      typeMatch[1],
+      "class",
+      "openplanet-header",
+      [],
+      typeMatch[2]
+    );
     addSymbol(index, undefined, {
       label: typeMatch[1],
       kind: CompletionItemKind.Class,
@@ -409,6 +484,23 @@ async function loadHeaderSymbolsFromHeader(
   }
 
   logger.info(`[symbols] Loaded Openplanet header symbols from ${filePath}`);
+}
+
+function stripHeaderComments(raw: string): string {
+  return raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+}
+
+function collectHeaderEnumMembers(enumBody: string): string[] {
+  const members: string[] = [];
+
+  for (const rawEntry of enumBody.split(",")) {
+    const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\b/.exec(rawEntry);
+    if (match?.[1]) {
+      members.push(match[1]);
+    }
+  }
+
+  return members;
 }
 
 async function readJsonFile(

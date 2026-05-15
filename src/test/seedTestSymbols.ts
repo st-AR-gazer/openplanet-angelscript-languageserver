@@ -1,5 +1,6 @@
 import { CompletionItemKind } from "vscode-languageserver/node";
 import { addSymbol, registerNamespacePath } from "../server/completions";
+import { registerSemanticTypeInfo } from "../server/members";
 import type { CompletionIndex } from "../server/types";
 
 export function seedTestSymbols(index: CompletionIndex): void {
@@ -24,10 +25,12 @@ export function seedTestSymbols(index: CompletionIndex): void {
     "void UI::Text(const string &in text, vec2 size)"
   ]);
 
-  index.typeInfoByFullName.set("Game::CGameCtnApp", {
+  registerSemanticTypeInfo(index, {
     fullName: "Game::CGameCtnApp",
     shortName: "CGameCtnApp",
     namespace: "Game",
+    kind: "class",
+    source: "generated",
     members: [
       {
         name: "CurrentPlayground",
@@ -36,10 +39,12 @@ export function seedTestSymbols(index: CompletionIndex): void {
       }
     ]
   });
-  index.typeInfoByFullName.set("Game::CGamePlayground", {
+  registerSemanticTypeInfo(index, {
     fullName: "Game::CGamePlayground",
     shortName: "CGamePlayground",
     namespace: "Game",
+    kind: "class",
+    source: "generated",
     members: [
       {
         name: "Analyzer",
@@ -48,10 +53,12 @@ export function seedTestSymbols(index: CompletionIndex): void {
       }
     ]
   });
-  index.typeInfoByFullName.set("CAnalyzer", {
+  registerSemanticTypeInfo(index, {
     fullName: "CAnalyzer",
     shortName: "CAnalyzer",
     namespace: "",
+    kind: "class",
+    source: "generated",
     members: [
       {
         name: "Id",
@@ -60,10 +67,12 @@ export function seedTestSymbols(index: CompletionIndex): void {
       }
     ]
   });
-  index.typeInfoByFullName.set("MwId", {
+  registerSemanticTypeInfo(index, {
     fullName: "MwId",
     shortName: "MwId",
     namespace: "",
+    kind: "class",
+    source: "generated",
     members: [
       {
         name: "Name",
@@ -79,10 +88,6 @@ export function seedTestSymbols(index: CompletionIndex): void {
     ]
   });
 
-  index.typeFullNamesByShortName.set("CGameCtnApp", ["Game::CGameCtnApp"]);
-  index.typeFullNamesByShortName.set("CGamePlayground", ["Game::CGamePlayground"]);
-  index.typeFullNamesByShortName.set("CAnalyzer", ["CAnalyzer"]);
-  index.typeFullNamesByShortName.set("MwId", ["MwId"]);
   index.gameTypeFullNames.add("Game::CGameCtnApp");
   index.gameTypeFullNames.add("Game::CGamePlayground");
 

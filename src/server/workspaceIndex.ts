@@ -20,7 +20,7 @@ const ignoredDirectoryNames = new Set<string>([
 const defaultReadConcurrency = 24;
 const defaultDependencyReadConcurrency = 16;
 
-interface DependencyBuildOptions {
+export interface DependencyBuildOptions {
   enableInfoTomlDependencies: boolean;
   includeOptionalDependencies: boolean;
   pluginRoots: string[];
@@ -139,6 +139,127 @@ export async function loadWorkspaceDocumentAnalysis(
     );
     return undefined;
   }
+}
+
+export async function collectDependencyAngelScriptUrisForPlugin(
+  pluginRootPath: string,
+  workspaceRoots: string[],
+  options: DependencyBuildOptions,
+  logger: Logger
+): Promise<string[]> {
+  if (!options.enableInfoTomlDependencies || options.maxFiles <= 0) {
+    return [];
+  }
+
+  const infoTomlText = await readFileIfExists(path.join(pluginRootPath, "info.toml"));
+  if (!infoTomlText) {
+    return [];
+  }
+
+  const rootDependencyNames = parseInfoTomlDependencies(
+    infoTomlText,
+    options.includeOptionalDependencies
+  );
+  if (rootDependencyNames.length === 0) {
+    return [];
+  }
+
+  const pluginRoots = await resolvePluginRoots(
+    workspaceRoots,
+    options.pluginRoots,
+    options.symbolsBaseUserFolderPath
+  );
+  if (pluginRoots.length === 0) {
+    return [];
+  }
+
+  const maxDepth = Math.max(0, options.maxDepth);
+  const maxFiles = Math.max(0, options.maxFiles);
+  const queue = rootDependencyNames.map((moduleName) => ({
+    moduleName,
+    depth: 0
+  }));
+  const visitedModules = new Set<string>();
+  const seenUris = new Set<string>();
+  const uris: string[] = [];
+
+  while (queue.length > 0 && uris.length < maxFiles) {
+    const current = queue.shift();
+    if (!current) {
+      break;
+    }
+
+    const moduleKey = current.moduleName.toLowerCase();
+    if (visitedModules.has(moduleKey)) {
+      continue;
+    }
+    visitedModules.add(moduleKey);
+
+    const matches = await findImportSourceMatches(current.moduleName, pluginRoots);
+    if (matches.length === 0) {
+      logger.info(
+        `[workspace-index] No source folder found for dependency "${current.moduleName}".`
+      );
+      continue;
+    }
+
+    for (const match of matches) {
+      if (uris.length >= maxFiles) {
+        break;
+      }
+
+      if (match.kind === "folder") {
+        const folderFiles = await collectFolderAngelScriptFiles(match.path);
+        for (const filePath of folderFiles) {
+          if (uris.length >= maxFiles) {
+            break;
+          }
+
+          const uri = URI.file(filePath).toString();
+          if (seenUris.has(uri)) {
+            continue;
+          }
+          seenUris.add(uri);
+          uris.push(uri);
+        }
+
+        if (current.depth < maxDepth) {
+          const dependencyInfoTomlText = await readFileIfExists(
+            path.join(match.path, "info.toml")
+          );
+          if (dependencyInfoTomlText) {
+            for (const dependencyName of parseInfoTomlDependencies(
+              dependencyInfoTomlText,
+              options.includeOptionalDependencies
+            )) {
+              const dependencyKey = dependencyName.toLowerCase();
+              if (!visitedModules.has(dependencyKey)) {
+                queue.push({
+                  moduleName: dependencyName,
+                  depth: current.depth + 1
+                });
+              }
+            }
+          }
+        }
+        continue;
+      }
+
+      const entries = await readOpAngelScriptEntries(match.path);
+      for (const entry of entries) {
+        if (uris.length >= maxFiles) {
+          break;
+        }
+        if (seenUris.has(entry.uri)) {
+          continue;
+        }
+        seenUris.add(entry.uri);
+        uris.push(entry.uri);
+      }
+    }
+  }
+
+  return uris.sort((a, b) => a.localeCompare(b));
 }
 
 function createWorkspaceTextDocument(uri: string, text: string): TextDocument {

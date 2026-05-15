@@ -10,4 +10,5 @@ scripts/**
 package-lock.json
 Test.as
 .gitignore
+out/node_modules/openplanet-angelscript-core/out/test/**
 ../**
