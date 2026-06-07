@@ -53,6 +53,7 @@ export interface DiagnosticSettings {
   enableCaseMismatch: boolean;
   enableSemanticBinding?: boolean;
   enableTypeChecking?: boolean;
+  enableCrossGameCompatibility?: boolean;
   maxSymbolDiagnostics: number;
 }
 

@@ -10,7 +10,13 @@ import {
   openplanetBuiltinDefines
 } from "openplanet-angelscript-core";
 import type { TextDocument } from "vscode-languageserver-textdocument";
-import type { DocumentAnalysis, FunctionDeclaration } from "./analysis";
+import {
+  collectVisibleUsingNamespacePathsAtOffset,
+  type DocumentAnalysis,
+  type FunctionDeclaration,
+  type TypeDeclaration,
+  type VariableDeclaration
+} from "./analysis";
 import type {
   CompletionBucket,
   CompletionIndex,
@@ -418,6 +424,8 @@ function normalizeCompletionItem(item: CompletionItem): CompletionItem {
   let normalized: CompletionItem;
   if (item.kind === CompletionItemKind.Function) {
     normalized = normalizeFunctionCompletionItem(item);
+  } else if (item.kind === CompletionItemKind.Module) {
+    normalized = normalizeNamespaceCompletionItem(item);
   } else if (item.kind === CompletionItemKind.Enum) {
     normalized = normalizeEnumCompletionItem(item);
   } else {
@@ -425,6 +433,28 @@ function normalizeCompletionItem(item: CompletionItem): CompletionItem {
   }
 
   return withDefaultCompletionSortText(normalized);
+}
+
+function normalizeNamespaceCompletionItem(item: CompletionItem): CompletionItem {
+  const insertText =
+    typeof item.insertText === "string" && item.insertText.length > 0
+      ? item.insertText
+      : item.label.endsWith("::")
+        ? item.label
+        : `${item.label}::`;
+
+  const command =
+    item.command ??
+    {
+      title: "Trigger Suggestions",
+      command: "editor.action.triggerSuggest"
+    };
+
+  return {
+    ...item,
+    insertText,
+    command
+  };
 }
 
 function normalizeEnumCompletionItem(item: CompletionItem): CompletionItem {
@@ -758,6 +788,367 @@ export function collectWorkspaceFunctionCompletionItems(
   );
 }
 
+export function collectWorkspaceScopedCompletionItems(
+  document: TextDocument,
+  analysis: DocumentAnalysis,
+  lineNumber: number,
+  character: number,
+  allAnalyses: readonly DocumentAnalysis[]
+): CompletionItem[] {
+  const offset = document.offsetAt({ line: lineNumber, character });
+  const explicitNamespace = getActiveNamespaceAtPosition(
+    document,
+    lineNumber,
+    character
+  );
+  const workspaceNamespaceChildren = buildWorkspaceNamespaceChildren(allAnalyses);
+  const items: CompletionItem[] = [];
+
+  if (explicitNamespace) {
+    items.push(
+      ...getWorkspaceNamespaceChildCompletionItems(
+        workspaceNamespaceChildren,
+        explicitNamespace
+      )
+    );
+    items.push(
+      ...collectWorkspaceNamespaceScopedSymbolCompletionItems(
+        allAnalyses,
+        explicitNamespace
+      )
+    );
+    return dedupeCompletionItems(items);
+  }
+
+  items.push(
+    ...getWorkspaceNamespaceChildCompletionItems(
+      workspaceNamespaceChildren,
+      undefined
+    )
+  );
+  items.push(...collectVisibleLocalCompletionItems(analysis, offset));
+
+  for (const namespacePath of collectImplicitNamespaceSearchPaths(analysis, offset)) {
+    items.push(
+      ...collectWorkspaceNamespaceScopedSymbolCompletionItems(
+        allAnalyses,
+        namespacePath
+      )
+    );
+  }
+
+  return dedupeCompletionItems(items);
+}
+
+function collectWorkspaceNamespaceScopedSymbolCompletionItems(
+  allAnalyses: readonly DocumentAnalysis[],
+  namespacePath: string
+): CompletionItem[] {
+  return dedupeCompletionItems([
+    ...collectWorkspaceFunctionCompletionItems(
+      allAnalyses,
+      namespacePath.length > 0 ? namespacePath : undefined
+    ),
+    ...collectWorkspaceGlobalValueCompletionItems(allAnalyses, namespacePath),
+    ...collectWorkspaceTypeCompletionItems(allAnalyses, namespacePath)
+  ]);
+}
+
+function collectWorkspaceGlobalValueCompletionItems(
+  allAnalyses: readonly DocumentAnalysis[],
+  namespacePath: string
+): CompletionItem[] {
+  const normalizedNamespace = normalizeNamespace(namespacePath) ?? "";
+  const itemsByKey = new Map<string, CompletionItem>();
+
+  for (const analysis of allAnalyses) {
+    for (const declaration of analysis.globalDeclarations) {
+      const declarationNamespace = extractNamespacePathFromQualifiedName(
+        declaration.name
+      );
+      if (declarationNamespace !== normalizedNamespace) {
+        continue;
+      }
+
+      const item = withDefaultCompletionSortText({
+        label: extractLeafNameFromQualifiedName(declaration.name),
+        kind: CompletionItemKind.Variable,
+        detail: declaration.type
+          ? `${declaration.type} workspace value`
+          : "Workspace value"
+      });
+      const key = `${item.label}|${item.detail ?? ""}`;
+      if (!itemsByKey.has(key)) {
+        itemsByKey.set(key, item);
+      }
+    }
+  }
+
+  return [...itemsByKey.values()].sort((left, right) =>
+    left.label.localeCompare(right.label)
+  );
+}
+
+function collectWorkspaceTypeCompletionItems(
+  allAnalyses: readonly DocumentAnalysis[],
+  namespacePath: string
+): CompletionItem[] {
+  const normalizedNamespace = normalizeNamespace(namespacePath) ?? "";
+  const itemsByKey = new Map<string, CompletionItem>();
+
+  for (const analysis of allAnalyses) {
+    for (const declaration of analysis.typeDeclarations) {
+      const declarationNamespace = extractNamespacePathFromQualifiedName(
+        declaration.fullName
+      );
+      if (declarationNamespace !== normalizedNamespace) {
+        continue;
+      }
+
+      const item = withDefaultCompletionSortText({
+        label: declaration.name,
+        kind: getWorkspaceTypeCompletionKind(declaration),
+        detail: `Workspace ${declaration.kind}`
+      });
+      const key = `${item.label}|${item.kind ?? 0}`;
+      if (!itemsByKey.has(key)) {
+        itemsByKey.set(key, item);
+      }
+    }
+  }
+
+  return [...itemsByKey.values()].sort((left, right) =>
+    left.label.localeCompare(right.label)
+  );
+}
+
+function getWorkspaceTypeCompletionKind(
+  declaration: TypeDeclaration
+): CompletionItemKind {
+  switch (declaration.kind) {
+    case "enum":
+      return CompletionItemKind.Enum;
+    case "interface":
+      return CompletionItemKind.Interface;
+    default:
+      return CompletionItemKind.Class;
+  }
+}
+
+function collectVisibleLocalCompletionItems(
+  analysis: DocumentAnalysis,
+  offset: number
+): CompletionItem[] {
+  const fn = findFunctionAtOffset(analysis.functions, offset);
+  if (!fn) {
+    return [];
+  }
+
+  const visibleByName = new Map<string, VariableDeclaration>();
+  for (const declaration of [...fn.parameters, ...fn.localDeclarations].sort(
+    (left, right) => left.start - right.start
+  )) {
+    if (declaration.start > offset) {
+      continue;
+    }
+    if (offset < declaration.scopeStart || offset > declaration.scopeEnd) {
+      continue;
+    }
+
+    visibleByName.set(declaration.name, declaration);
+  }
+
+  return [...visibleByName.values()]
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .map((declaration) =>
+      withDefaultCompletionSortText({
+        label: declaration.name,
+        kind: CompletionItemKind.Variable,
+        detail: declaration.type
+          ? `${declaration.type} ${declaration.isParameter ? "parameter" : "local"}`
+          : declaration.isParameter
+            ? "Parameter"
+            : "Local variable"
+      })
+    );
+}
+
+function findFunctionAtOffset(
+  functions: readonly FunctionDeclaration[],
+  offset: number
+): FunctionDeclaration | undefined {
+  let best: FunctionDeclaration | undefined;
+
+  for (const fn of functions) {
+    if (offset < fn.start || offset > fn.end) {
+      continue;
+    }
+
+    if (!best || fn.end - fn.start < best.end - best.start) {
+      best = fn;
+    }
+  }
+
+  return best;
+}
+
+function collectImplicitNamespaceSearchPaths(
+  analysis: DocumentAnalysis,
+  offset: number
+): string[] {
+  const searchPaths: string[] = [];
+  const enclosingNamespacePath = findEnclosingNamespacePathAtOffset(
+    analysis.grammarProgram.declarations,
+    offset,
+    ""
+  );
+
+  pushNamespacePathAndAncestors(searchPaths, enclosingNamespacePath);
+
+  for (const namespacePath of collectVisibleUsingNamespacePathsAtOffset(
+    analysis.grammarProgram.declarations,
+    offset
+  )) {
+    const normalized = normalizeNamespace(namespacePath) ?? "";
+    if (normalized.length > 0) {
+      addUniqueSearchPath(searchPaths, normalized);
+    }
+  }
+
+  addUniqueSearchPath(searchPaths, "");
+  return searchPaths;
+}
+
+function pushNamespacePathAndAncestors(
+  searchPaths: string[],
+  namespacePath: string
+): void {
+  const normalized = normalizeNamespace(namespacePath);
+  if (!normalized) {
+    return;
+  }
+
+  const segments = normalized.split("::");
+  for (let count = segments.length; count >= 1; count -= 1) {
+    addUniqueSearchPath(searchPaths, segments.slice(0, count).join("::"));
+  }
+}
+
+function addUniqueSearchPath(searchPaths: string[], namespacePath: string): void {
+  if (!searchPaths.includes(namespacePath)) {
+    searchPaths.push(namespacePath);
+  }
+}
+
+function findEnclosingNamespacePathAtOffset(
+  declarations: DocumentAnalysis["grammarProgram"]["declarations"],
+  offset: number,
+  namespacePath: string
+): string {
+  for (const declaration of declarations) {
+    if (declaration.kind !== "namespace") {
+      continue;
+    }
+    if (offset < declaration.start || offset > declaration.end) {
+      continue;
+    }
+
+    const childNamespacePath = namespacePath
+      ? `${namespacePath}::${declaration.name}`
+      : declaration.name;
+    return findEnclosingNamespacePathAtOffset(
+      declaration.body,
+      offset,
+      childNamespacePath
+    );
+  }
+
+  return namespacePath;
+}
+
+function buildWorkspaceNamespaceChildren(
+  allAnalyses: readonly DocumentAnalysis[]
+): Map<string, Set<string>> {
+  const childrenByParent = new Map<string, Set<string>>();
+
+  for (const analysis of allAnalyses) {
+    visitWorkspaceNamespaceDeclarations(
+      analysis.grammarProgram.declarations,
+      "",
+      childrenByParent
+    );
+  }
+
+  return childrenByParent;
+}
+
+function visitWorkspaceNamespaceDeclarations(
+  declarations: DocumentAnalysis["grammarProgram"]["declarations"],
+  namespacePath: string,
+  childrenByParent: Map<string, Set<string>>
+): void {
+  for (const declaration of declarations) {
+    if (declaration.kind !== "namespace") {
+      continue;
+    }
+
+    const parentKey = namespacePath || ROOT_NAMESPACE;
+    let children = childrenByParent.get(parentKey);
+    if (!children) {
+      children = new Set<string>();
+      childrenByParent.set(parentKey, children);
+    }
+    children.add(declaration.name);
+
+    const childNamespacePath = namespacePath
+      ? `${namespacePath}::${declaration.name}`
+      : declaration.name;
+    visitWorkspaceNamespaceDeclarations(
+      declaration.body,
+      childNamespacePath,
+      childrenByParent
+    );
+  }
+}
+
+function getWorkspaceNamespaceChildCompletionItems(
+  childrenByParent: Map<string, Set<string>>,
+  parentNamespace: string | undefined
+): CompletionItem[] {
+  const key = parentNamespace ?? ROOT_NAMESPACE;
+  const children = childrenByParent.get(key);
+  if (!children || children.size === 0) {
+    return [];
+  }
+
+  return [...children]
+    .sort((left, right) => left.localeCompare(right))
+    .map((segment) =>
+      withDefaultCompletionSortText({
+        label: `${segment}::`,
+        insertText: `${segment}::`,
+        kind: CompletionItemKind.Module,
+        command: {
+          title: "Trigger Suggestions",
+          command: "editor.action.triggerSuggest"
+        },
+        detail: parentNamespace
+          ? `workspace namespace ${parentNamespace}::${segment}`
+          : `workspace namespace ${segment}`
+      })
+    );
+}
+
+function extractNamespacePathFromQualifiedName(value: string): string {
+  const separatorIndex = value.lastIndexOf("::");
+  return separatorIndex >= 0 ? value.slice(0, separatorIndex) : "";
+}
+
+function extractLeafNameFromQualifiedName(value: string): string {
+  const separatorIndex = value.lastIndexOf("::");
+  return separatorIndex >= 0 ? value.slice(separatorIndex + 2) : value;
+}
+
 function getNamespaceChildCompletionItems(
   index: CompletionIndex,
   parentNamespace: string | undefined
@@ -779,6 +1170,10 @@ function getNamespaceChildCompletionItems(
         label: `${segment}::`,
         insertText: `${segment}::`,
         kind: CompletionItemKind.Module,
+        command: {
+          title: "Trigger Suggestions",
+          command: "editor.action.triggerSuggest"
+        },
         detail: `namespace ${fullNamespace}`
       };
       return withDefaultCompletionSortText(item);

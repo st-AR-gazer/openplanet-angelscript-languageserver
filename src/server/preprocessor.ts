@@ -11,6 +11,8 @@ import {
   type PreprocessorModel
 } from "openplanet-angelscript-core";
 import { LANGUAGE_SERVER_DIAGNOSTIC_SOURCE } from "./includes";
+import { collectGameProfilePreprocessorDefines } from "./gameProfiles";
+import type { OpenplanetLanguageServerSettings } from "./types";
 import { uriToFsPath } from "./util";
 
 export const unknownPreprocessorDefineCode = "unknown-preprocessor-define";
@@ -22,7 +24,12 @@ interface InfoTomlPreprocessorConfig {
   optionalDependencies: string[];
 }
 
-interface BuildDocumentPreprocessorOptions {
+export interface GameProfilePreprocessorOptions {
+  trueDefines?: Iterable<string>;
+  falseDefines?: Iterable<string>;
+}
+
+interface BuildDocumentPreprocessorOptions extends GameProfilePreprocessorOptions {
   knownDependencyKeys?: Iterable<string>;
   dependencyMacroFallback?: PreprocessorBuildOptions["dependencyMacroFallback"];
 }
@@ -33,9 +40,12 @@ const infoTomlPreprocessorCache = new Map<
 >();
 
 export function collectPreprocessorDiagnostics(
-  document: TextDocument
+  document: TextDocument,
+  options?: BuildDocumentPreprocessorOptions
 ): Diagnostic[] {
   const model = buildDocumentPreprocessorModel(document, {
+    trueDefines: options?.trueDefines,
+    falseDefines: options?.falseDefines,
     dependencyMacroFallback: "unknown"
   });
 
@@ -63,7 +73,8 @@ export function collectPreprocessorDiagnostics(
 export function filterDiagnosticsForInactivePreprocessorBranches(
   document: TextDocument,
   diagnostics: Diagnostic[],
-  knownDependencyKeys: Iterable<string>
+  knownDependencyKeys: Iterable<string>,
+  options?: BuildDocumentPreprocessorOptions
 ): Diagnostic[] {
   if (diagnostics.length === 0) {
     return diagnostics;
@@ -71,6 +82,8 @@ export function filterDiagnosticsForInactivePreprocessorBranches(
 
   const model = buildDocumentPreprocessorModel(document, {
     knownDependencyKeys,
+    trueDefines: options?.trueDefines,
+    falseDefines: options?.falseDefines,
     dependencyMacroFallback: "false"
   });
 
@@ -85,12 +98,21 @@ export function buildDocumentPreprocessorModel(
   options?: BuildDocumentPreprocessorOptions
 ): PreprocessorModel {
   const infoToml = loadInfoTomlPreprocessorConfigForDocument(document.uri);
-  return buildOpenplanetPreprocessorModel(document.getText(), {
+  const buildOptions: PreprocessorBuildOptions & GameProfilePreprocessorOptions = {
     defines: infoToml.defines,
+    trueDefines: options?.trueDefines,
+    falseDefines: options?.falseDefines,
     dependencies: options?.knownDependencyKeys ?? infoToml.dependencies,
     optionalDependencies: infoToml.optionalDependencies,
     dependencyMacroFallback: options?.dependencyMacroFallback ?? "unknown"
-  });
+  };
+  return buildOpenplanetPreprocessorModel(document.getText(), buildOptions);
+}
+
+export function getGameProfilePreprocessorOptions(
+  settings: OpenplanetLanguageServerSettings
+): GameProfilePreprocessorOptions {
+  return collectGameProfilePreprocessorDefines(settings.symbols);
 }
 
 function loadInfoTomlPreprocessorConfigForDocument(

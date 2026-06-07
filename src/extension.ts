@@ -13,6 +13,7 @@ import {
 } from "vscode-languageclient/node";
 
 let languageServerClient: LanguageClient | undefined;
+let pendingIdentifierSuggestTimer: ReturnType<typeof setTimeout> | undefined;
 
 interface LspLikePosition {
   line: number;
@@ -486,6 +487,40 @@ export async function activate(
   );
 
   context.subscriptions.push(
+    vscode.workspace.onDidChangeTextDocument((event) => {
+      const editor = vscode.window.activeTextEditor;
+      const triggerPosition = getIdentifierSuggestTriggerPosition(editor, event);
+      if (!triggerPosition) {
+        return;
+      }
+
+      if (pendingIdentifierSuggestTimer) {
+        clearTimeout(pendingIdentifierSuggestTimer);
+      }
+
+      const documentUri = event.document.uri.toString();
+      const documentVersion = event.document.version;
+      pendingIdentifierSuggestTimer = setTimeout(() => {
+        pendingIdentifierSuggestTimer = undefined;
+        void triggerIdentifierSuggestFallback(
+          documentUri,
+          documentVersion,
+          triggerPosition
+        );
+      }, 0);
+    })
+  );
+
+  context.subscriptions.push({
+    dispose: () => {
+      if (pendingIdentifierSuggestTimer) {
+        clearTimeout(pendingIdentifierSuggestTimer);
+        pendingIdentifierSuggestTimer = undefined;
+      }
+    }
+  });
+
+  context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(async (event) => {
       if (!event.affectsConfiguration("openplanetLanguageServer.enable")) {
         return;
@@ -520,6 +555,97 @@ function toLspRange(range: vscode.Range): LspLikeRange {
       character: range.end.character
     }
   };
+}
+
+function getIdentifierSuggestTriggerPosition(
+  editor: vscode.TextEditor | undefined,
+  event: vscode.TextDocumentChangeEvent
+): vscode.Position | undefined {
+  if (!editor || editor.document !== event.document) {
+    return undefined;
+  }
+
+  if (event.document.languageId !== "openplanet-angelscript") {
+    return undefined;
+  }
+
+  if (!isIdentifierAutoTriggerEnabled(event.document)) {
+    return undefined;
+  }
+
+  if (event.contentChanges.length !== 1) {
+    return undefined;
+  }
+
+  const change = event.contentChanges[0];
+  const isSingleIdentifierInsert =
+    change.rangeLength === 0 &&
+    change.text.length === 1 &&
+    /[A-Za-z0-9_]/.test(change.text);
+  const isDeletion = change.text.length === 0 && change.rangeLength > 0;
+  if (!isSingleIdentifierInsert && !isDeletion) {
+    return undefined;
+  }
+
+  const triggerPosition = isDeletion
+    ? change.range.start
+    : change.range.start.translate(0, change.text.length);
+  const identifierPrefix = getIdentifierPrefixAtPosition(
+    event.document,
+    triggerPosition
+  );
+  if (!identifierPrefix) {
+    return undefined;
+  }
+
+  return triggerPosition;
+}
+
+async function triggerIdentifierSuggestFallback(
+  documentUri: string,
+  documentVersion: number,
+  expectedPosition: vscode.Position
+): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.uri.toString() !== documentUri) {
+    return;
+  }
+
+  if (editor.document.version !== documentVersion) {
+    return;
+  }
+
+  if (editor.document.languageId !== "openplanet-angelscript") {
+    return;
+  }
+
+  if (!editor.selection.isEmpty || !editor.selection.active.isEqual(expectedPosition)) {
+    return;
+  }
+
+  if (!isIdentifierAutoTriggerEnabled(editor.document)) {
+    return;
+  }
+
+  await vscode.commands.executeCommand("editor.action.triggerSuggest");
+}
+
+function isIdentifierAutoTriggerEnabled(document: vscode.TextDocument): boolean {
+  return vscode.workspace
+    .getConfiguration("openplanetLanguageServer", document)
+    .get<boolean>("completion.autoTriggerOnIdentifierCharacters", true);
+}
+
+function getIdentifierPrefixAtPosition(
+  document: vscode.TextDocument,
+  position: vscode.Position
+): string | undefined {
+  const linePrefix = document.lineAt(position.line).text.slice(0, position.character);
+  const match =
+    /([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*|[A-Za-z_][A-Za-z0-9_]*)$/.exec(
+      linePrefix
+    );
+  return match?.[1];
 }
 
 function toVsCodeRange(range: LspLikeRange): vscode.Range {

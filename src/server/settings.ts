@@ -45,6 +45,7 @@ export function createDefaultSettings(): OpenplanetLanguageServerSettings {
       enableCaseMismatch: true,
       enableSemanticBinding: true,
       enableTypeChecking: true,
+      enableCrossGameCompatibility: true,
       maxSymbolDiagnostics: 200
     },
     completion: {
@@ -234,6 +235,11 @@ export function normalizeSettings(raw: unknown): OpenplanetLanguageServerSetting
     typeof diagnosticsRoot.enableTypeChecking === "boolean"
       ? diagnosticsRoot.enableTypeChecking
       : defaults.diagnostics.enableTypeChecking ?? true;
+
+  const enableCrossGameCompatibility =
+    typeof diagnosticsRoot.enableCrossGameCompatibility === "boolean"
+      ? diagnosticsRoot.enableCrossGameCompatibility
+      : defaults.diagnostics.enableCrossGameCompatibility ?? true;
 
   const maxSymbolDiagnostics = normalizeNumber(
     diagnosticsRoot.maxSymbolDiagnostics,
@@ -438,6 +444,7 @@ export function normalizeSettings(raw: unknown): OpenplanetLanguageServerSetting
       enableCaseMismatch,
       enableSemanticBinding,
       enableTypeChecking,
+      enableCrossGameCompatibility,
       maxSymbolDiagnostics
     },
     completion: {

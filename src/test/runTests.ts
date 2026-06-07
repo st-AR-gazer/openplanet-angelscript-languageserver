@@ -22,6 +22,7 @@ import {
   collectDirectiveCommentSnippetItems,
   collectCompletionItems,
   collectPreprocessorCompletionItems,
+  collectWorkspaceScopedCompletionItems,
   collectWorkspaceFunctionCompletionItems,
   createCompletionIndex,
   dedupeCompletionItems,
@@ -36,7 +37,10 @@ import {
   getSemanticDiagnostics,
   getSyntaxDiagnostics
 } from "../server/diagnostics";
-import { collectPreprocessorDiagnostics } from "../server/preprocessor";
+import {
+  collectPreprocessorDiagnostics,
+  getGameProfilePreprocessorOptions
+} from "../server/preprocessor";
 import { getHoverAtPosition } from "../server/hover";
 import { getInlayHints } from "../server/inlayHints";
 import { getIncludeDiagnostics } from "../server/includes";
@@ -102,14 +106,19 @@ async function main(): Promise<void> {
   testUnclosedParenDoesNotCascadeToMissingBlockCloseDiagnostic();
   testUnknownPreprocessorDefinesAreReported();
   await testInfoTomlDefinesSuppressUnknownPreprocessorDiagnostics();
+  testGameProfilePreprocessorFilteringSuppressesInactiveBranchDiagnostics();
+  testCrossGameCompatibilityWarnsForPartialElseBranchCoverage();
   testVariableDeclarationParsingMultiDeclarator();
   testFunctionParameterDefaultInitializerListParsing();
   testEnumCompletionCommitsWithNamespaceChain();
+  testNamespaceCompletionCommitsWithNamespaceChain();
   testEnumMembersOnlyShownInsideEnumScope();
   testWorkspaceEnumMembersAppearInsideEnumScope(index);
   testFunctionCompletionShowsReturnTypeWithoutDuplicateName();
   testFunctionCompletionResolveShowsSignatureName();
   testWorkspaceGlobalFunctionCompletion(index);
+  testWorkspaceNamespaceAndValueCompletion();
+  testScopeAwareWorkspaceValueAndLocalCompletion();
   testCompletionSortsCallablesBeforeValues();
   testMemberCompletionSortsMethodsBeforeFields();
   testPreprocessorDirectiveCompletions();
@@ -239,6 +248,7 @@ async function main(): Promise<void> {
   testColorProvider();
   testConstructorAndDestructorParsing();
   testDocumentSymbols();
+  testTypeDocumentSymbols();
   testNamespaceDocumentSymbols();
   await testImportValidationFolderOnlyWarning();
   await testImportValidationFolderJunctionWarningAndLookup();
@@ -253,6 +263,8 @@ async function main(): Promise<void> {
   await testDependencyScopedTypesSuppressUnknownTypeDiagnostics();
   await testCompletionIndexGameProfileSelection();
   await testCompletionIndexGameProfilePathOverrides();
+  await testCompletionIndexFallsBackToBundledCoreSymbols();
+  await testCompletionIndexFallsBackToBundledGameSymbols();
   await testCompletionIndexSynthesizesNamespaceAccessorProperties();
   await testCompletionIndexStoresQualifiedFunctionReturnTypes();
   await testCompletionIndexSeedsAlwaysAvailableNamespaces();
@@ -5708,10 +5720,17 @@ function testConstructorAndDestructorParsing(): void {
   );
   const analysis = analyzeDocument(document);
 
-  const names = analysis.documentSymbols.map((symbol) => symbol.name);
-  assert.ok(names.includes("DemoObject"), "Expected constructor symbol in outline.");
-  assert.ok(names.includes("~DemoObject"), "Expected destructor symbol in outline.");
-  assert.ok(names.includes("Tick"), "Expected regular method symbol in outline.");
+  const classSymbol = analysis.documentSymbols.find(
+    (symbol) => symbol.kind === SymbolKind.Class && symbol.name === "DemoObject"
+  );
+  assert.ok(classSymbol, "Expected class symbol in outline.");
+  const childNames = classSymbol?.children?.map((symbol) => symbol.name) ?? [];
+  assert.ok(childNames.includes("DemoObject"), "Expected constructor symbol nested under class.");
+  assert.ok(
+    childNames.includes("~DemoObject"),
+    "Expected destructor symbol nested under class."
+  );
+  assert.ok(childNames.includes("Tick"), "Expected regular method symbol nested under class.");
 }
 
 function testDocumentSymbols(): void {
@@ -5731,6 +5750,54 @@ function testDocumentSymbols(): void {
   );
   assert.strictEqual(analysis.documentSymbols[0].name, "A");
   assert.strictEqual(analysis.documentSymbols[1].name, "B");
+}
+
+function testTypeDocumentSymbols(): void {
+  const source = [
+    "namespace Outer {",
+    "  class DemoType {",
+    "    void Tick() { }",
+    "  }",
+    "}",
+    "interface DemoInterface {",
+    "  void Run();",
+    "}",
+    "enum DemoEnum {",
+    "  ValueA,",
+    "}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///symbols-types.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+
+  const outer = analysis.documentSymbols.find(
+    (symbol) => symbol.kind === SymbolKind.Namespace && symbol.name === "Outer"
+  );
+  assert.ok(outer, "Expected Outer namespace symbol in document outline.");
+
+  const demoType = outer?.children?.find(
+    (symbol) => symbol.kind === SymbolKind.Class && symbol.name === "DemoType"
+  );
+  assert.ok(demoType, "Expected DemoType class nested under Outer.");
+
+  const tick = demoType?.children?.find(
+    (symbol) => symbol.kind === SymbolKind.Function && symbol.name === "Tick"
+  );
+  assert.ok(tick, "Expected Tick method nested under DemoType.");
+
+  const demoInterface = analysis.documentSymbols.find(
+    (symbol) => symbol.kind === SymbolKind.Interface && symbol.name === "DemoInterface"
+  );
+  assert.ok(demoInterface, "Expected DemoInterface interface symbol at document root.");
+
+  const demoEnum = analysis.documentSymbols.find(
+    (symbol) => symbol.kind === SymbolKind.Enum && symbol.name === "DemoEnum"
+  );
+  assert.ok(demoEnum, "Expected DemoEnum enum symbol at document root.");
 }
 
 function testNamespaceDocumentSymbols(): void {
@@ -6078,6 +6145,162 @@ async function testInfoTomlDefinesSuppressUnknownPreprocessorDiagnostics(): Prom
   }
 }
 
+function testGameProfilePreprocessorFilteringSuppressesInactiveBranchDiagnostics(): void {
+  const source = [
+    "void Main() {",
+    "  Game::CameraInfo camera;",
+    "#if TMNEXT",
+    "  float aspect = camera.Width_Height;",
+    "#else",
+    "  float aspect = camera.RatioXY;",
+    "#endif",
+    "}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///tmnext-preprocessor-branch-filtering.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+  const index = createCompletionIndex();
+  registerSemanticTypeInfo(index, {
+    fullName: "Game::CameraInfo",
+    shortName: "CameraInfo",
+    namespace: "Game",
+    kind: "class",
+    source: "openplanet-game-json",
+    members: [
+      {
+        name: "Width_Height",
+        kind: "property",
+        type: "float"
+      }
+    ]
+  });
+
+  const diagnostics = getSemanticDiagnostics(
+    document,
+    analysis,
+    [analysis],
+    index,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      enableSemanticBinding: true,
+      enableTypeChecking: true,
+      maxSymbolDiagnostics: 20
+    },
+    undefined,
+    getGameProfilePreprocessorOptions(createDefaultSettings())
+  );
+
+  assert.ok(
+    !diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "unknown-member" &&
+        diagnostic.message.includes("\"RatioXY\"")
+    ),
+    "Expected TMNEXT-active preprocessor filtering to suppress inactive else-branch member diagnostics."
+  );
+}
+
+function testCrossGameCompatibilityWarnsForPartialElseBranchCoverage(): void {
+  const source = [
+    "void Main() {",
+    "  Game::CameraInfo camera;",
+    "#if TMNEXT",
+    "  float aspect = camera.Width_Height;",
+    "#else",
+    "  float aspect = camera.RatioXY;",
+    "#endif",
+    "}"
+  ].join("\n");
+  const document = TextDocument.create(
+    "file:///cross-game-compatibility-warning.as",
+    "openplanet-angelscript",
+    1,
+    source
+  );
+  const analysis = analyzeDocument(document);
+
+  const nextIndex = createCompletionIndex();
+  registerSemanticTypeInfo(nextIndex, {
+    fullName: "Game::CameraInfo",
+    shortName: "CameraInfo",
+    namespace: "Game",
+    kind: "class",
+    source: "openplanet-game-json",
+    members: [
+      { name: "Width_Height", kind: "property", type: "float" }
+    ]
+  });
+
+  const turboIndex = createCompletionIndex();
+  registerSemanticTypeInfo(turboIndex, {
+    fullName: "Game::CameraInfo",
+    shortName: "CameraInfo",
+    namespace: "Game",
+    kind: "class",
+    source: "openplanet-game-json",
+    members: [
+      { name: "RatioXY", kind: "property", type: "float" }
+    ]
+  });
+
+  const openplanet4Index = createCompletionIndex();
+  registerSemanticTypeInfo(openplanet4Index, {
+    fullName: "Game::CameraInfo",
+    shortName: "CameraInfo",
+    namespace: "Game",
+    kind: "class",
+    source: "openplanet-game-json",
+    members: [
+      { name: "AspectRatio", kind: "property", type: "float" }
+    ]
+  });
+
+  const diagnostics = getSemanticDiagnostics(
+    document,
+    analysis,
+    [analysis],
+    nextIndex,
+    {
+      enableUnknownSymbols: true,
+      enableCaseMismatch: true,
+      enableSemanticBinding: true,
+      enableTypeChecking: true,
+      enableCrossGameCompatibility: true,
+      maxSymbolDiagnostics: 20
+    },
+    undefined,
+    getGameProfilePreprocessorOptions(createDefaultSettings()),
+    new Map([
+      ["trackmania2020", nextIndex],
+      ["turbo", turboIndex],
+      ["openplanet4", openplanet4Index]
+    ])
+  );
+
+  const compatibilityWarning = diagnostics.find(
+    (diagnostic) =>
+      diagnostic.code === "cross-game-branch-member-compatibility" &&
+      diagnostic.message.includes("\"RatioXY\"")
+  );
+  assert.ok(
+    compatibilityWarning,
+    "Expected a cross-game compatibility warning when an else-branch member is missing in one alternate game profile."
+  );
+  assert.ok(
+    compatibilityWarning?.message.includes("TURBO"),
+    "Expected the warning to mention the compatible alternate game profile."
+  );
+  assert.ok(
+    compatibilityWarning?.message.includes("MP4"),
+    "Expected the warning to mention the incompatible alternate game profile."
+  );
+}
+
 function testVariableDeclarationParsingMultiDeclarator(): void {
   const source = [
     "void Main() {",
@@ -6141,6 +6364,51 @@ function testEnumCompletionCommitsWithNamespaceChain(): void {
     classItem?.insertText,
     "Texture::",
     "Expected non-enum completion commits to keep default insert behavior."
+  );
+}
+
+function testNamespaceCompletionCommitsWithNamespaceChain(): void {
+  const index = createCompletionIndex();
+  registerNamespacePath(index, "OffzoneVisualizer::Offzone::UI");
+
+  const rootItems = collectCompletionItems(index, undefined);
+  const rootNamespaceItem = rootItems.find(
+    (item) =>
+      item.kind === CompletionItemKind.Module &&
+      item.label === "OffzoneVisualizer::"
+  );
+  assert.ok(
+    rootNamespaceItem,
+    "Expected root namespace completion item for OffzoneVisualizer::."
+  );
+  assert.strictEqual(
+    rootNamespaceItem?.insertText,
+    "OffzoneVisualizer::",
+    "Expected root namespace completion to include trailing namespace scope operator."
+  );
+  assert.strictEqual(
+    rootNamespaceItem?.command?.command,
+    "editor.action.triggerSuggest",
+    "Expected root namespace completion to retrigger suggestions after accept."
+  );
+
+  const childItems = collectCompletionItems(index, "OffzoneVisualizer::Offzone");
+  const childNamespaceItem = childItems.find(
+    (item) => item.kind === CompletionItemKind.Module && item.label === "UI::"
+  );
+  assert.ok(
+    childNamespaceItem,
+    "Expected child namespace completion item for UI::."
+  );
+  assert.strictEqual(
+    childNamespaceItem?.insertText,
+    "UI::",
+    "Expected child namespace completion to include trailing namespace scope operator."
+  );
+  assert.strictEqual(
+    childNamespaceItem?.command?.command,
+    "editor.action.triggerSuggest",
+    "Expected child namespace completion to retrigger suggestions after accept."
   );
 }
 
@@ -6366,6 +6634,172 @@ function testWorkspaceGlobalFunctionCompletion(
         signature.includes('string _fnName = ""')
     ),
     "Expected workspace function completion to retain default string values."
+  );
+}
+
+function testWorkspaceNamespaceAndValueCompletion(): void {
+  const usageLine =
+    "      OffzoneVisualizer::Offzone::UI::S_RenderWorld = true;";
+  const usageDocument = TextDocument.create(
+    "file:///plugin/src/app/main.as",
+    "openplanet-angelscript",
+    1,
+    [
+      "namespace OffzoneVisualizer {",
+      "  namespace App {",
+      "    void RenderMenu() {",
+      usageLine,
+      "    }",
+      "  }",
+      "}"
+    ].join("\n")
+  );
+  const settingsDocument = TextDocument.create(
+    "file:///plugin/src/offzone/ui/settings.as",
+    "openplanet-angelscript",
+    1,
+    [
+      "namespace OffzoneVisualizer {",
+      "  namespace Offzone {",
+      "    namespace UI {",
+      "      bool S_RenderWorld = true;",
+      "    }",
+      "  }",
+      "}"
+    ].join("\n")
+  );
+  const allAnalyses = [
+    analyzeDocument(usageDocument),
+    analyzeDocument(settingsDocument)
+  ];
+  const usageAnalysis = allAnalyses[0];
+
+  const rootPrefixCharacter = usageLine.indexOf("Offzo") + "Offzo".length;
+  const rootItems = collectWorkspaceScopedCompletionItems(
+    usageDocument,
+    usageAnalysis,
+    3,
+    rootPrefixCharacter,
+    allAnalyses
+  );
+  assert.ok(
+    rootItems.some(
+      (item) =>
+        item.kind === CompletionItemKind.Module &&
+        item.label === "OffzoneVisualizer::"
+    ),
+    "Expected workspace root namespace completion to include OffzoneVisualizer::."
+  );
+  const rootNamespaceItem = rootItems.find(
+    (item) =>
+      item.kind === CompletionItemKind.Module &&
+      item.label === "OffzoneVisualizer::"
+  );
+  assert.strictEqual(
+    rootNamespaceItem?.command?.command,
+    "editor.action.triggerSuggest",
+    "Expected workspace root namespace completion to retrigger suggestions after accept."
+  );
+
+  const uiPrefixCharacter = usageLine.indexOf("UI::") + "U".length;
+  const namespaceItems = collectWorkspaceScopedCompletionItems(
+    usageDocument,
+    usageAnalysis,
+    3,
+    uiPrefixCharacter,
+    allAnalyses
+  );
+  assert.ok(
+    namespaceItems.some(
+      (item) => item.kind === CompletionItemKind.Module && item.label === "UI::"
+    ),
+    "Expected workspace child namespace completion to include UI::."
+  );
+  const childNamespaceItem = namespaceItems.find(
+    (item) => item.kind === CompletionItemKind.Module && item.label === "UI::"
+  );
+  assert.strictEqual(
+    childNamespaceItem?.command?.command,
+    "editor.action.triggerSuggest",
+    "Expected workspace child namespace completion to retrigger suggestions after accept."
+  );
+
+  const valuePrefixCharacter =
+    usageLine.indexOf("S_RenderWorld") + "S_R".length;
+  const valueItems = collectWorkspaceScopedCompletionItems(
+    usageDocument,
+    usageAnalysis,
+    3,
+    valuePrefixCharacter,
+    allAnalyses
+  );
+  assert.ok(
+    valueItems.some(
+      (item) =>
+        item.kind === CompletionItemKind.Variable &&
+        item.label === "S_RenderWorld"
+    ),
+    "Expected workspace namespace value completion to include S_RenderWorld."
+  );
+}
+
+function testScopeAwareWorkspaceValueAndLocalCompletion(): void {
+  const globalPrefixLine = "      S_WindowOpen = toggleCount;";
+  const localPrefixLine = "      toggleCount += 1;";
+  const usageDocument = TextDocument.create(
+    "file:///plugin/src/app/main.as",
+    "openplanet-angelscript",
+    1,
+    [
+      "namespace OffzoneVisualizer {",
+      "  namespace App {",
+      "    bool S_WindowOpen = true;",
+      "    void RenderMenu() {",
+      "      int toggleCount = 0;",
+      globalPrefixLine,
+      localPrefixLine,
+      "    }",
+      "  }",
+      "}"
+    ].join("\n")
+  );
+  const analysis = analyzeDocument(usageDocument);
+  const allAnalyses = [analysis];
+
+  const globalPrefixCharacter =
+    globalPrefixLine.indexOf("S_WindowOpen") + "S_W".length;
+  const globalItems = collectWorkspaceScopedCompletionItems(
+    usageDocument,
+    analysis,
+    5,
+    globalPrefixCharacter,
+    allAnalyses
+  );
+  assert.ok(
+    globalItems.some(
+      (item) =>
+        item.kind === CompletionItemKind.Variable &&
+        item.label === "S_WindowOpen"
+    ),
+    "Expected unqualified current-namespace completion to include S_WindowOpen."
+  );
+
+  const localPrefixCharacter =
+    localPrefixLine.indexOf("toggleCount") + "toggleC".length;
+  const localItems = collectWorkspaceScopedCompletionItems(
+    usageDocument,
+    analysis,
+    6,
+    localPrefixCharacter,
+    allAnalyses
+  );
+  assert.ok(
+    localItems.some(
+      (item) =>
+        item.kind === CompletionItemKind.Variable &&
+        item.label === "toggleCount"
+    ),
+    "Expected visible local completion to include toggleCount."
   );
 }
 
@@ -7418,6 +7852,100 @@ async function testCompletionIndexGameProfilePathOverrides(): Promise<void> {
     );
   } finally {
     await fs.rm(baseUserFolder, { recursive: true, force: true });
+  }
+}
+
+async function testCompletionIndexFallsBackToBundledCoreSymbols(): Promise<void> {
+  const tempRoot = await fs.mkdtemp(
+    path.join(os.tmpdir(), "openplanet-ls-bundled-core-fallback-")
+  );
+  const previousOverride = process.env.OPENPLANET_LS_BUNDLED_SYMBOLS_ROOT;
+
+  try {
+    const bundledRoot = path.join(tempRoot, "bundled");
+    await fs.mkdir(path.join(bundledRoot, "OpenplanetNext"), { recursive: true });
+    await writeCoreJsonWithGlobalFunction(
+      path.join(bundledRoot, "OpenplanetNext", "OpenplanetCore.json"),
+      "BundledNextFunction"
+    );
+
+    process.env.OPENPLANET_LS_BUNDLED_SYMBOLS_ROOT = bundledRoot;
+
+    const settings = createDefaultSettings();
+    settings.symbols.baseUserFolderPath = path.join(tempRoot, "missing-install");
+    settings.symbols.enableGameJson = false;
+    settings.symbols.enableHeader = false;
+    settings.symbols.trackmania2020.enabled = true;
+    settings.symbols.turbo.enabled = false;
+    settings.symbols.openplanet4.enabled = false;
+
+    const index = await buildCompletionIndex(settings, createNoopLogger());
+    assert.ok(
+      index.coreGlobalFunctionNames.has("BundledNextFunction"),
+      "Expected bundled OpenplanetNext core symbols to load when the local install path is missing."
+    );
+  } finally {
+    if (previousOverride === undefined) {
+      delete process.env.OPENPLANET_LS_BUNDLED_SYMBOLS_ROOT;
+    } else {
+      process.env.OPENPLANET_LS_BUNDLED_SYMBOLS_ROOT = previousOverride;
+    }
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  }
+}
+
+async function testCompletionIndexFallsBackToBundledGameSymbols(): Promise<void> {
+  const tempRoot = await fs.mkdtemp(
+    path.join(os.tmpdir(), "openplanet-ls-bundled-game-fallback-")
+  );
+  const previousOverride = process.env.OPENPLANET_LS_BUNDLED_SYMBOLS_ROOT;
+
+  try {
+    const bundledRoot = path.join(tempRoot, "bundled");
+    const nextRoot = path.join(bundledRoot, "OpenplanetNext");
+    await fs.mkdir(nextRoot, { recursive: true });
+    await fs.writeFile(
+      path.join(nextRoot, "OpenplanetNext.json"),
+      `${JSON.stringify(
+        {
+          ns: {
+            Game: {
+              CameraInfo: {
+                m: [{ n: "Width_Height", t: "float" }]
+              }
+            }
+          }
+        },
+        null,
+        2
+      )}\n`,
+      "utf8"
+    );
+
+    process.env.OPENPLANET_LS_BUNDLED_SYMBOLS_ROOT = bundledRoot;
+
+    const settings = createDefaultSettings();
+    settings.symbols.baseUserFolderPath = path.join(tempRoot, "missing-install");
+    settings.symbols.enableCoreJson = false;
+    settings.symbols.enableGameJson = true;
+    settings.symbols.enableHeader = false;
+    settings.symbols.trackmania2020.enabled = true;
+    settings.symbols.turbo.enabled = false;
+    settings.symbols.openplanet4.enabled = false;
+
+    const index = await buildCompletionIndex(settings, createNoopLogger());
+    const typeInfo = index.typeInfoByFullName.get("Game::CameraInfo");
+    assert.ok(
+      typeInfo?.members.some((member) => member.name === "Width_Height"),
+      "Expected bundled OpenplanetNext game JSON symbols to load when the local install path is missing."
+    );
+  } finally {
+    if (previousOverride === undefined) {
+      delete process.env.OPENPLANET_LS_BUNDLED_SYMBOLS_ROOT;
+    } else {
+      process.env.OPENPLANET_LS_BUNDLED_SYMBOLS_ROOT = previousOverride;
+    }
+    await fs.rm(tempRoot, { recursive: true, force: true });
   }
 }
 

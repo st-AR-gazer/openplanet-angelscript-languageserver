@@ -135,6 +135,15 @@
         "language": "openplanet-angelscript"
       }
     ],
+    "configurationDefaults": {
+      "[openplanet-angelscript]": {
+        "editor.quickSuggestions": {
+          "other": true,
+          "comments": false,
+          "strings": false
+        }
+      }
+    },
     "configuration": {
       "title": "Openplanet AngelScript Language Server",
       "properties": {
@@ -252,6 +261,11 @@
           "default": true,
           "description": "Enable argument/assignment/operator/return type-compatibility diagnostics."
         },
+        "openplanetLanguageServer.diagnostics.enableCrossGameCompatibility": {
+          "type": "boolean",
+          "default": true,
+          "description": "Warn when preprocessor-gated code appears valid for the current game profile but is missing members in one or more alternate Openplanet game profiles."
+        },
         "openplanetLanguageServer.diagnostics.maxSymbolDiagnostics": {
           "type": "number",
           "default": 200,
@@ -262,6 +276,11 @@
           "type": "boolean",
           "default": true,
           "description": "Enable keyword and namespace-aware completions."
+        },
+        "openplanetLanguageServer.completion.autoTriggerOnIdentifierCharacters": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically retrigger the suggest widget after identifier typing and identifier deletions so completions reopen as you correct typos."
         },
         "openplanetLanguageServer.completion.namespaces": {
           "type": "array",

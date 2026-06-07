@@ -43,6 +43,7 @@ import {
   collectDirectiveCommentSnippetItems,
   collectCompletionItems,
   collectPreprocessorCompletionItems,
+  collectWorkspaceScopedCompletionItems,
   collectWorkspaceFunctionCompletionItems,
   createCompletionIndex,
   dedupeCompletionItems,
@@ -56,7 +57,10 @@ import {
   getSemanticDiagnostics,
   getSyntaxDiagnostics
 } from "./server/diagnostics";
-import { collectPreprocessorDiagnostics } from "./server/preprocessor";
+import {
+  collectPreprocessorDiagnostics,
+  getGameProfilePreprocessorOptions
+} from "./server/preprocessor";
 import { getCodeLensesForDocument } from "./server/codeLenses";
 import {
   getColorPresentations,
@@ -110,7 +114,10 @@ import {
   createDefaultSettings,
   normalizeSettings
 } from "./server/settings";
-import { buildCompletionIndex } from "./server/symbols";
+import {
+  buildCompletionIndex,
+  buildGameProfileCompletionIndices
+} from "./server/symbols";
 import {
   getTypeHierarchySubtypes,
   getTypeHierarchySupertypes,
@@ -118,6 +125,7 @@ import {
 } from "./server/typeHierarchy";
 import type {
   CompletionIndex,
+  GameIdentifier,
   Logger,
   OpenplanetLanguageServerSettings,
   SemanticTokenMode
@@ -137,6 +145,7 @@ let hasDidChangeWatchedFilesCapability = false;
 let workspaceRoots: string[] = [];
 let settings: OpenplanetLanguageServerSettings = createDefaultSettings();
 let completionIndex: CompletionIndex = createCompletionIndex();
+let gameProfileCompletionIndices = new Map<GameIdentifier, CompletionIndex>();
 
 const analysisCache = new Map<string, DocumentAnalysis>();
 let workspaceAnalysisCache = new Map<string, DocumentAnalysis>();
@@ -319,6 +328,7 @@ connection.onCompletion(
 
     const document = documents.get(params.textDocument.uri);
     let scopedAnalyses: DocumentAnalysis[] | undefined;
+    let workspaceScopedItems: CompletionItem[] = [];
     let effectiveCompletionIndex = completionIndex;
     if (document) {
       const preprocessorItems = collectPreprocessorCompletionItems(
@@ -381,6 +391,14 @@ connection.onCompletion(
 
         return [];
       }
+
+      workspaceScopedItems = collectWorkspaceScopedCompletionItems(
+        document,
+        analysis,
+        params.position.line,
+        params.position.character,
+        allAnalyses
+      );
     }
 
     const activeNamespace = document
@@ -399,7 +417,11 @@ connection.onCompletion(
     const workspaceItems = scopedAnalyses
       ? collectWorkspaceFunctionCompletionItems(scopedAnalyses, activeNamespace)
       : [];
-    const mergedItems = dedupeCompletionItems([...workspaceItems, ...items]);
+    const mergedItems = dedupeCompletionItems([
+      ...workspaceScopedItems,
+      ...workspaceItems,
+      ...items
+    ]);
     if (activeNamespace) {
       return mergedItems;
     }
@@ -1011,6 +1033,10 @@ function scheduleCompletionIndexRebuild(reason: string): void {
 
   completionIndexBuildPromise = (async () => {
     const index = await buildCompletionIndex(buildSettings, logger);
+    const profileIndices = await buildGameProfileCompletionIndices(
+      buildSettings,
+      logger
+    );
     const currentSettingsKey = serializeSettingsKey(settings);
 
     if (buildGeneration !== completionIndexBuildGeneration) {
@@ -1024,6 +1050,7 @@ function scheduleCompletionIndexRebuild(reason: string): void {
     }
 
     completionIndex = index;
+    gameProfileCompletionIndices = profileIndices;
     completionIndexReadySettingsKey = buildSettingsKey;
     logger.info(
       `[symbols] Completion index rebuilt (${reason}) in ${Date.now() - startedAt}ms`
@@ -1143,8 +1170,9 @@ async function validateTextDocument(
   analysis = getDocumentAnalysis(document);
   maybeLogParserDebugOutput(document, analysis);
   maybeCrashOnParserError(document, analysis);
+  const gamePreprocessorOptions = getGameProfilePreprocessorOptions(settings);
   diagnostics.push(...getSyntaxDiagnostics(document, analysis, settings.parser));
-  diagnostics.push(...collectPreprocessorDiagnostics(document));
+  diagnostics.push(...collectPreprocessorDiagnostics(document, gamePreprocessorOptions));
 
   if (settings.imports.enable) {
     const importDiagnostics = await getImportDiagnostics(
@@ -1163,7 +1191,8 @@ async function validateTextDocument(
 
   if (
     settings.diagnostics.enableUnknownSymbols ||
-    settings.diagnostics.enableCaseMismatch
+    settings.diagnostics.enableCaseMismatch ||
+    settings.diagnostics.enableCrossGameCompatibility
   ) {
     if (!isCompletionIndexReadyForCurrentSettings()) {
       if (isValidationCancelled(targetUri, targetVersion, expectedGeneration)) {
@@ -1188,7 +1217,9 @@ async function validateTextDocument(
         allAnalyses,
         completionIndex,
         settings.diagnostics,
-        scopedReturnTypes
+        scopedReturnTypes,
+        gamePreprocessorOptions,
+        gameProfileCompletionIndices
       )
     );
   }

@@ -16,6 +16,11 @@ import {
   getTypeResolutionContextAtPosition,
   resolveVisibleLocalDeclaration
 } from "./analysis";
+import {
+  gameProfileDefinitions,
+  getGameProfileDisplayName,
+  getSingleGameProfilePreprocessorDefines
+} from "./gameProfiles";
 import { runBinderPhase } from "./binderPipeline";
 import {
   isIntrinsicCallableIdentifier,
@@ -42,6 +47,7 @@ import { addSymbol } from "./completions";
 import type {
   CompletionIndex,
   DiagnosticSettings,
+  GameIdentifier,
   ParserSettings,
   TypeInfo
 } from "./types";
@@ -61,7 +67,11 @@ import {
   collectDefaultArgumentOrderingDiagnostics as collectDefaultArgumentOrderingDiagnosticsFromModule,
   collectUnknownTypeDiagnostics as collectUnknownTypeDiagnosticsFromModule
 } from "./diagnosticsType";
-import { filterDiagnosticsForInactivePreprocessorBranches } from "./preprocessor";
+import {
+  buildDocumentPreprocessorModel,
+  filterDiagnosticsForInactivePreprocessorBranches,
+  type GameProfilePreprocessorOptions
+} from "./preprocessor";
 
 const caseMismatchCode = "case-mismatch-symbol";
 const unknownSymbolCode = "unknown-symbol";
@@ -76,6 +86,7 @@ const operatorTypeMismatchCode = "operator-type-mismatch";
 const invalidMemberCallCode = "invalid-member-call";
 const caseMismatchMemberCode = "case-mismatch-member";
 const unknownMemberCode = "unknown-member";
+const crossGameBranchMemberCompatibilityCode = "cross-game-branch-member-compatibility";
 const implicitConversionNotExactCode = "implicit-conversion-not-exact";
 const stringByValueParameterCode = "string-parameter-pass-by-value";
 const syntaxUnclosedDelimiterCode = "syntax-unclosed-delimiter";
@@ -167,15 +178,20 @@ export function getSemanticDiagnostics(
   allAnalyses: DocumentAnalysis[],
   index: CompletionIndex,
   settings: DiagnosticSettings,
-  workspaceFunctionReturnTypes?: Map<string, string>
+  workspaceFunctionReturnTypes?: Map<string, string>,
+  preprocessorOptions?: GameProfilePreprocessorOptions,
+  gameProfileIndices?: ReadonlyMap<GameIdentifier, CompletionIndex>
 ): Diagnostic[] {
   const enableSemanticBinding = settings.enableSemanticBinding ?? true;
   const enableTypeChecking = settings.enableTypeChecking ?? true;
+  const enableCrossGameCompatibility =
+    settings.enableCrossGameCompatibility ?? true;
   if (
     !settings.enableUnknownSymbols &&
     !settings.enableCaseMismatch &&
     !enableSemanticBinding &&
-    !enableTypeChecking
+    !enableTypeChecking &&
+    !enableCrossGameCompatibility
   ) {
     return [];
   }
@@ -562,15 +578,32 @@ export function getSemanticDiagnostics(
     );
   }
 
-  return annotateDiagnosticsWithCompilerText(
+  const filteredDiagnostics = annotateDiagnosticsWithCompilerText(
     filterDiagnosticsForInactivePreprocessorBranches(
       document,
       dedupeDiagnostics(diagnostics),
-      collectKnownDependencyKeys(allAnalyses, effectiveIndex)
+      collectKnownDependencyKeys(allAnalyses, effectiveIndex),
+      preprocessorOptions
     ),
     document,
     analysis
   );
+
+  const crossGameDiagnostics = enableCrossGameCompatibility
+    ? collectCrossGameBranchMemberCompatibilityDiagnostics(
+        document,
+        analysis,
+        allAnalyses,
+        effectiveIndex,
+        settings,
+        workspaceFunctionReturnTypes,
+        preprocessorOptions,
+        gameProfileIndices,
+        lineTextCache
+      )
+    : [];
+
+  return dedupeDiagnostics([...filteredDiagnostics, ...crossGameDiagnostics]);
 }
 
 function buildUnknownMemberDiagnostic(
@@ -685,6 +718,154 @@ function buildUnknownMemberDiagnostic(
       replacements: suggestions
     } satisfies DiagnosticData
   };
+}
+
+function collectCrossGameBranchMemberCompatibilityDiagnostics(
+  document: TextDocument,
+  analysis: DocumentAnalysis,
+  allAnalyses: DocumentAnalysis[],
+  activeIndex: CompletionIndex,
+  settings: DiagnosticSettings,
+  workspaceFunctionReturnTypes: Map<string, string> | undefined,
+  preprocessorOptions: GameProfilePreprocessorOptions | undefined,
+  gameProfileIndices: ReadonlyMap<GameIdentifier, CompletionIndex> | undefined,
+  lineTextCache: Map<number, string>
+): Diagnostic[] {
+  if (!preprocessorOptions || !gameProfileIndices || gameProfileIndices.size === 0) {
+    return [];
+  }
+
+  const knownDependencyKeys = collectKnownDependencyKeys(allAnalyses, activeIndex);
+  const activeModel = buildDocumentPreprocessorModel(document, {
+    knownDependencyKeys,
+    trueDefines: preprocessorOptions.trueDefines,
+    falseDefines: preprocessorOptions.falseDefines,
+    dependencyMacroFallback: "false"
+  });
+  const alternateModels = new Map<GameIdentifier, ReturnType<typeof buildDocumentPreprocessorModel>>();
+  const diagnostics: Diagnostic[] = [];
+
+  for (const profile of gameProfileDefinitions) {
+    alternateModels.set(
+      profile.id,
+      buildDocumentPreprocessorModel(document, {
+        knownDependencyKeys,
+        ...getSingleGameProfilePreprocessorDefines(profile.id),
+        dependencyMacroFallback: "false"
+      })
+    );
+  }
+
+  for (const occurrence of analysis.occurrences) {
+    if (occurrence.qualifier !== "dot" || occurrence.isDeclaration) {
+      continue;
+    }
+
+    const lineNumber = occurrence.range.start.line;
+    if (activeModel.lineStates[lineNumber] !== false) {
+      continue;
+    }
+
+    const lineText = getLineText(document, lineNumber, lineTextCache);
+    const receiverText = extractReceiverTextForMemberOccurrence(
+      lineText,
+      occurrence.range.start.character
+    );
+    if (!receiverText) {
+      continue;
+    }
+
+    const activeProfiles: string[] = [];
+    const compatibleProfiles: string[] = [];
+    const incompatibleProfiles: string[] = [];
+    let resolvedReceiverType: string | undefined;
+
+    for (const profile of gameProfileDefinitions) {
+      const alternateModel = alternateModels.get(profile.id);
+      if (!alternateModel || alternateModel.lineStates[lineNumber] !== true) {
+        continue;
+      }
+
+      const profileIndex = gameProfileIndices.get(profile.id);
+      if (!profileIndex) {
+        continue;
+      }
+
+      const displayName = getGameProfileDisplayName(profile.id);
+      activeProfiles.push(displayName);
+
+      const typeContext = getTypeResolutionContextAtPosition(
+        document,
+        analysis,
+        lineNumber,
+        occurrence.range.start.character,
+        allAnalyses,
+        workspaceFunctionReturnTypes,
+        profileIndex
+      );
+      const receiverTypeFullName = tryResolveExpressionTypeFullName(
+        profileIndex,
+        receiverText,
+        typeContext
+      );
+      if (!receiverTypeFullName) {
+        continue;
+      }
+
+      if (!resolvedReceiverType) {
+        resolvedReceiverType = receiverTypeFullName;
+      }
+
+      const member = findResolvedMember(
+        profileIndex,
+        receiverTypeFullName,
+        occurrence.name
+      );
+      if (member && (!occurrence.isCall || member.kind === "method")) {
+        compatibleProfiles.push(displayName);
+        continue;
+      }
+
+      incompatibleProfiles.push(displayName);
+    }
+
+    if (activeProfiles.length === 0 || incompatibleProfiles.length === 0) {
+      continue;
+    }
+
+    const receiverTypeLabel = resolvedReceiverType ?? "the resolved receiver type";
+    const availabilityMessage =
+      compatibleProfiles.length > 0
+        ? `available in ${formatProfileList(compatibleProfiles)} but missing in ${formatProfileList(
+            incompatibleProfiles
+          )}`
+        : `missing in ${formatProfileList(incompatibleProfiles)}`;
+
+    diagnostics.push({
+      severity: DiagnosticSeverity.Warning,
+      range: occurrence.range,
+      message: `Cross-game compatibility: "${occurrence.name}" on type "${receiverTypeLabel}" is active for ${formatProfileList(
+        activeProfiles
+      )} in this preprocessor branch, but it is ${availabilityMessage}.`,
+      source: LANGUAGE_SERVER_DIAGNOSTIC_SOURCE,
+      code: crossGameBranchMemberCompatibilityCode
+    });
+  }
+
+  return diagnostics;
+}
+
+function formatProfileList(profiles: readonly string[]): string {
+  if (profiles.length === 0) {
+    return "no known game profiles";
+  }
+  if (profiles.length === 1) {
+    return profiles[0];
+  }
+  if (profiles.length === 2) {
+    return `${profiles[0]} and ${profiles[1]}`;
+  }
+  return `${profiles.slice(0, -1).join(", ")}, and ${profiles[profiles.length - 1]}`;
 }
 
 export function buildQuickFixCodeActions(

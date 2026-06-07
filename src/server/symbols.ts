@@ -5,14 +5,16 @@ import {
 } from "vscode-languageserver/node";
 import type {
   CompletionIndex,
-  GameDefinition,
   GameIdentifier,
-  GameSymbolSourceSettings,
   Logger,
-  OpenplanetLanguageServerSettings,
-  SymbolSettings
+  OpenplanetLanguageServerSettings
 } from "./types";
 import { addSymbol, createCompletionIndex, registerNamespacePath } from "./completions";
+import {
+  gameProfileDefinitions,
+  getGameSourceSettings,
+  type GameProfileDefinition
+} from "./gameProfiles";
 import { openplanetIconNames } from "./icons.generated";
 import {
   registerCoreClassTypeInfo,
@@ -27,30 +29,14 @@ import {
   toRecord
 } from "./util";
 
-const gameDefinitions: GameDefinition[] = [
-  {
-    id: "trackmania2020",
-    folder: "OpenplanetNext",
-    gameJsonFile: "OpenplanetNext.json"
-  },
-  {
-    id: "turbo",
-    folder: "OpenplanetTurbo",
-    gameJsonFile: "OpenplanetTurbo.json"
-  },
-  {
-    id: "openplanet4",
-    folder: "Openplanet4",
-    gameJsonFile: "Openplanet4.json"
-  }
-];
-
 const alwaysAvailableNamespaces = [
   "Controls",
   "Camera",
   "VehicleState",
   "NadeoServices"
 ];
+
+const bundledSymbolsRootEnvVar = "OPENPLANET_LS_BUNDLED_SYMBOLS_ROOT";
 
 export async function buildCompletionIndex(
   desiredSettings: OpenplanetLanguageServerSettings,
@@ -68,7 +54,7 @@ export async function buildCompletionIndex(
     registerNamespacePath(index, namespaceName);
   }
 
-  for (const gameDefinition of gameDefinitions) {
+  for (const gameDefinition of gameProfileDefinitions) {
     const gameSettings = getGameSourceSettings(
       desiredSettings.symbols,
       gameDefinition.id
@@ -84,7 +70,7 @@ export async function buildCompletionIndex(
         gameSettings.openplanetCoreJsonPath,
         path.join(gameBasePath, "OpenplanetCore.json")
       );
-      await loadCoreSymbolsFromJson(corePath, index, logger);
+      await loadCoreSymbolsWithFallback(corePath, gameDefinition, index, logger);
     }
 
     if (desiredSettings.symbols.enableGameJson) {
@@ -92,7 +78,12 @@ export async function buildCompletionIndex(
         gameSettings.gameJsonPath,
         path.join(gameBasePath, gameDefinition.gameJsonFile)
       );
-      await loadNextSymbolsFromJson(gameJsonPath, index, logger);
+      await loadGameSymbolsWithFallback(
+        gameJsonPath,
+        gameDefinition,
+        index,
+        logger
+      );
     }
 
     if (desiredSettings.symbols.enableHeader) {
@@ -100,7 +91,7 @@ export async function buildCompletionIndex(
         gameSettings.openplanetHeaderPath,
         path.join(gameBasePath, "Openplanet.h")
       );
-      await loadHeaderSymbolsFromHeader(headerPath, index, logger);
+      await loadHeaderSymbolsWithFallback(headerPath, gameDefinition, index, logger);
     }
   }
 
@@ -108,28 +99,80 @@ export async function buildCompletionIndex(
   return index;
 }
 
-function getGameSourceSettings(
-  symbolSettings: SymbolSettings,
-  gameId: GameIdentifier
-): GameSymbolSourceSettings {
-  switch (gameId) {
-    case "trackmania2020":
-      return symbolSettings.trackmania2020;
-    case "turbo":
-      return symbolSettings.turbo;
-    case "openplanet4":
-      return symbolSettings.openplanet4;
+export async function buildGameProfileCompletionIndices(
+  desiredSettings: OpenplanetLanguageServerSettings,
+  logger: Logger
+): Promise<Map<GameIdentifier, CompletionIndex>> {
+  const indices = new Map<GameIdentifier, CompletionIndex>();
+
+  for (const profile of gameProfileDefinitions) {
+    const perProfileSettings = createSingleGameProfileSettings(
+      desiredSettings,
+      profile.id
+    );
+    indices.set(profile.id, await buildCompletionIndex(perProfileSettings, logger));
   }
+
+  return indices;
 }
 
+function createSingleGameProfileSettings(
+  settings: OpenplanetLanguageServerSettings,
+  activeGameId: GameIdentifier
+): OpenplanetLanguageServerSettings {
+  return {
+    ...settings,
+    completion: {
+      ...settings.completion,
+      namespaces: [...settings.completion.namespaces],
+      shortcuts: { ...settings.completion.shortcuts }
+    },
+    includePaths: [...settings.includePaths],
+    imports: {
+      ...settings.imports,
+      pluginRoots: [...settings.imports.pluginRoots]
+    },
+    dependencies: {
+      ...settings.dependencies,
+      pluginRoots: [...settings.dependencies.pluginRoots]
+    },
+    diagnostics: { ...settings.diagnostics },
+    inlayHints: {
+      ...settings.inlayHints,
+      parameterHintsIgnoredParameterNames: [
+        ...settings.inlayHints.parameterHintsIgnoredParameterNames
+      ],
+      parameterHintsIgnoredFunctionNames: [
+        ...settings.inlayHints.parameterHintsIgnoredFunctionNames
+      ]
+    },
+    inlineValues: { ...settings.inlineValues },
+    semanticTokens: { ...settings.semanticTokens },
+    symbols: {
+      ...settings.symbols,
+      trackmania2020: {
+        ...settings.symbols.trackmania2020,
+        enabled: activeGameId === "trackmania2020"
+      },
+      turbo: {
+        ...settings.symbols.turbo,
+        enabled: activeGameId === "turbo"
+      },
+      openplanet4: {
+        ...settings.symbols.openplanet4,
+        enabled: activeGameId === "openplanet4"
+      }
+    }
+  };
+}
 async function loadCoreSymbolsFromJson(
   filePath: string,
   index: CompletionIndex,
   logger: Logger
-): Promise<void> {
+): Promise<boolean> {
   const parsed = await readJsonFile(filePath, logger);
   if (!parsed) {
-    return;
+    return false;
   }
 
   const root = toRecord(parsed);
@@ -321,6 +364,7 @@ async function loadCoreSymbolsFromJson(
   }
 
   logger.info(`[symbols] Loaded Openplanet core symbols from ${filePath}`);
+  return true;
 }
 
 function addBuiltinIconSymbols(index: CompletionIndex): void {
@@ -356,10 +400,10 @@ async function loadNextSymbolsFromJson(
   filePath: string,
   index: CompletionIndex,
   logger: Logger
-): Promise<void> {
+): Promise<boolean> {
   const parsed = await readJsonFile(filePath, logger);
   if (!parsed) {
-    return;
+    return false;
   }
 
   const root = toRecord(parsed);
@@ -386,6 +430,7 @@ async function loadNextSymbolsFromJson(
   }
 
   logger.info(`[symbols] Loaded Openplanet game namespaces from ${filePath}`);
+  return true;
 }
 
 function looksLikeGameTypeRecord(record: Record<string, unknown>): boolean {
@@ -402,7 +447,7 @@ async function loadHeaderSymbolsFromHeader(
   filePath: string,
   index: CompletionIndex,
   logger: Logger
-): Promise<void> {
+): Promise<boolean> {
   let raw = "";
 
   try {
@@ -410,7 +455,7 @@ async function loadHeaderSymbolsFromHeader(
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     logger.warn(`[symbols] Failed to load ${filePath}: ${message}`);
-    return;
+    return false;
   }
 
   const namespacePattern = /using\s+namespace\s+([A-Za-z_][A-Za-z0-9_:]*)\s*;/g;
@@ -484,6 +529,114 @@ async function loadHeaderSymbolsFromHeader(
   }
 
   logger.info(`[symbols] Loaded Openplanet header symbols from ${filePath}`);
+  return true;
+}
+
+async function loadCoreSymbolsWithFallback(
+  primaryPath: string,
+  gameDefinition: GameProfileDefinition,
+  index: CompletionIndex,
+  logger: Logger
+): Promise<void> {
+  const loadedPrimary = await loadCoreSymbolsFromJson(primaryPath, index, logger);
+  if (loadedPrimary) {
+    return;
+  }
+
+  const bundledPath = getBundledSymbolSourcePath(
+    gameDefinition,
+    "OpenplanetCore.json"
+  );
+  if (!bundledPath || normalizeCaseInsensitivePath(primaryPath) === normalizeCaseInsensitivePath(bundledPath)) {
+    return;
+  }
+
+  const loadedBundled = await loadCoreSymbolsFromJson(bundledPath, index, logger);
+  if (loadedBundled) {
+    logger.info(
+      `[symbols] Falling back to bundled core symbols for ${gameDefinition.folder}: ${bundledPath}`
+    );
+  }
+}
+
+async function loadGameSymbolsWithFallback(
+  primaryPath: string,
+  gameDefinition: GameProfileDefinition,
+  index: CompletionIndex,
+  logger: Logger
+): Promise<void> {
+  const loadedPrimary = await loadNextSymbolsFromJson(primaryPath, index, logger);
+  if (loadedPrimary) {
+    return;
+  }
+
+  const bundledPath = getBundledSymbolSourcePath(
+    gameDefinition,
+    gameDefinition.gameJsonFile
+  );
+  if (!bundledPath || normalizeCaseInsensitivePath(primaryPath) === normalizeCaseInsensitivePath(bundledPath)) {
+    return;
+  }
+
+  const loadedBundled = await loadNextSymbolsFromJson(bundledPath, index, logger);
+  if (loadedBundled) {
+    logger.info(
+      `[symbols] Falling back to bundled game symbols for ${gameDefinition.folder}: ${bundledPath}`
+    );
+  }
+}
+
+async function loadHeaderSymbolsWithFallback(
+  primaryPath: string,
+  gameDefinition: GameProfileDefinition,
+  index: CompletionIndex,
+  logger: Logger
+): Promise<void> {
+  const loadedPrimary = await loadHeaderSymbolsFromHeader(primaryPath, index, logger);
+  if (loadedPrimary) {
+    return;
+  }
+
+  const bundledPath = getBundledSymbolSourcePath(gameDefinition, "Openplanet.h");
+  if (!bundledPath || normalizeCaseInsensitivePath(primaryPath) === normalizeCaseInsensitivePath(bundledPath)) {
+    return;
+  }
+
+  const loadedBundled = await loadHeaderSymbolsFromHeader(
+    bundledPath,
+    index,
+    logger
+  );
+  if (loadedBundled) {
+    logger.info(
+      `[symbols] Falling back to bundled header symbols for ${gameDefinition.folder}: ${bundledPath}`
+    );
+  }
+}
+
+function getBundledSymbolSourcePath(
+  gameDefinition: GameProfileDefinition,
+  fileName: string
+): string | undefined {
+  const root = getBundledSymbolsRoot();
+  if (!root) {
+    return undefined;
+  }
+
+  return path.join(root, gameDefinition.folder, fileName);
+}
+
+function getBundledSymbolsRoot(): string | undefined {
+  const override = process.env[bundledSymbolsRootEnvVar]?.trim();
+  if (override && override.length > 0) {
+    return path.resolve(override);
+  }
+
+  return path.resolve(__dirname, "..", "..", "resources", "symbols");
+}
+
+function normalizeCaseInsensitivePath(value: string): string {
+  return path.normalize(value).toLowerCase();
 }
 
 function stripHeaderComments(raw: string): string {

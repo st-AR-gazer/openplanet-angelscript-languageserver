@@ -2132,124 +2132,120 @@ function buildDocumentSymbols(
   grammarProgram: GrammarProgramNode,
   document: TextDocument
 ): DocumentSymbol[] {
-  const namespaceOffsetRanges = new WeakMap<DocumentSymbol, { start: number; end: number }>();
-  const namespaceSymbols = buildNamespaceDocumentSymbols(
-    grammarProgram.declarations,
-    document,
-    namespaceOffsetRanges
-  );
-
-  const rootSymbols: DocumentSymbol[] = [];
-  rootSymbols.push(...namespaceSymbols);
-
+  const functionByNameStart = new Map<number, FunctionDeclaration>();
   for (const fn of functions) {
-    const fnSymbol = DocumentSymbol.create(
-      fn.name,
-      `${fn.returnType}(${fn.argsText})`,
-      SymbolKind.Function,
-      fn.range,
-      fn.nameRange
-    );
-
-    if (!fn.namespacePath) {
-      rootSymbols.push(fnSymbol);
-      continue;
-    }
-
-    const namespaceContainer = findNamespaceSymbolForFunction(
-      namespaceSymbols,
-      namespaceOffsetRanges,
-      fn.namespacePath,
-      fn.start
-    );
-    if (!namespaceContainer) {
-      rootSymbols.push(fnSymbol);
-      continue;
-    }
-
-    if (!namespaceContainer.children) {
-      namespaceContainer.children = [];
-    }
-    namespaceContainer.children.push(fnSymbol);
+    functionByNameStart.set(fn.nameStart, fn);
   }
 
+  const rootSymbols = buildDeclarationDocumentSymbols(
+    grammarProgram.declarations,
+    document,
+    functionByNameStart
+  );
   sortDocumentSymbolsByRange(rootSymbols);
   return rootSymbols;
 }
 
-function buildNamespaceDocumentSymbols(
+function buildDeclarationDocumentSymbols(
   declarations: GrammarDeclarationNode[],
   document: TextDocument,
-  namespaceOffsetRanges: WeakMap<DocumentSymbol, { start: number; end: number }>
+  functionByNameStart: Map<number, FunctionDeclaration>
 ): DocumentSymbol[] {
   const symbols: DocumentSymbol[] = [];
 
   for (const declaration of declarations) {
-    if (declaration.kind !== "namespace") {
+    if (declaration.kind === "namespace") {
+      const children = buildDeclarationDocumentSymbols(
+        declaration.body,
+        document,
+        functionByNameStart
+      );
+      symbols.push(
+        DocumentSymbol.create(
+          declaration.name,
+          "",
+          SymbolKind.Namespace,
+          offsetsToRange(document, declaration.start, declaration.end),
+          offsetsToRange(document, declaration.nameStart, declaration.nameEnd),
+          children
+        )
+      );
       continue;
     }
 
-    const children = buildNamespaceDocumentSymbols(
-      declaration.body,
-      document,
-      namespaceOffsetRanges
-    );
-    const symbol = DocumentSymbol.create(
-      declaration.name,
-      "",
-      SymbolKind.Namespace,
-      offsetsToRange(document, declaration.start, declaration.end),
-      offsetsToRange(document, declaration.nameStart, declaration.nameEnd),
-      children
-    );
-    namespaceOffsetRanges.set(symbol, { start: declaration.start, end: declaration.end });
-    symbols.push(symbol);
+    if (declaration.kind === "type") {
+      const children = buildDeclarationDocumentSymbols(
+        declaration.body,
+        document,
+        functionByNameStart
+      );
+      symbols.push(
+        DocumentSymbol.create(
+          declaration.name,
+          "",
+          mapTypeDeclarationKindToDocumentSymbolKind(declaration.typeKind),
+          offsetsToRange(document, declaration.start, declaration.end),
+          offsetsToRange(document, declaration.nameStart, declaration.nameEnd),
+          children
+        )
+      );
+      continue;
+    }
+
+    if (declaration.kind === "function") {
+      const fn = functionByNameStart.get(declaration.nameStart);
+      const symbolName = getDocumentSymbolFunctionName(declaration, fn);
+      const detail = fn
+        ? getDocumentSymbolFunctionDetail(fn.returnType, fn.argsText)
+        : getDocumentSymbolFunctionDetail(
+            declaration.returnTypeText,
+            declaration.parameters.map((parameter) => parameter.typeText).join(", ")
+          );
+      symbols.push(
+        DocumentSymbol.create(
+          symbolName,
+          detail,
+          SymbolKind.Function,
+          offsetsToRange(document, declaration.start, declaration.end),
+          offsetsToRange(document, declaration.nameStart, declaration.nameEnd)
+        )
+      );
+    }
   }
 
   sortDocumentSymbolsByRange(symbols);
   return symbols;
 }
 
-function findNamespaceSymbolForFunction(
-  rootNamespaces: DocumentSymbol[],
-  namespaceOffsetRanges: WeakMap<DocumentSymbol, { start: number; end: number }>,
-  namespacePath: string,
-  functionStartOffset: number
-): DocumentSymbol | undefined {
-  const segments = namespacePath.split("::").filter((segment) => segment.length > 0);
-  if (segments.length === 0) {
-    return undefined;
+function mapTypeDeclarationKindToDocumentSymbolKind(
+  kind: "class" | "interface" | "enum"
+): SymbolKind {
+  switch (kind) {
+    case "class":
+      return SymbolKind.Class;
+    case "interface":
+      return SymbolKind.Interface;
+    case "enum":
+      return SymbolKind.Enum;
   }
+}
 
-  let current: DocumentSymbol | undefined;
-  let candidates: DocumentSymbol[] = rootNamespaces;
-
-  for (const segment of segments) {
-    const matching = candidates.filter((symbol) => {
-      if (symbol.kind !== SymbolKind.Namespace) {
-        return false;
-      }
-      if (symbol.name !== segment) {
-        return false;
-      }
-
-      const offsets = namespaceOffsetRanges.get(symbol);
-      if (!offsets || (offsets.start === 0 && offsets.end === 0)) {
-        return true;
-      }
-
-      return functionStartOffset >= offsets.start && functionStartOffset <= offsets.end;
-    });
-
-    if (matching.length === 0) {
-      return undefined;
-    }
-
-    current = matching[0];
-    candidates = current.children ?? [];
+function getDocumentSymbolFunctionName(
+  declaration: GrammarFunctionDeclarationNode,
+  fn: FunctionDeclaration | undefined
+): string {
+  const returnType = fn?.returnType || declaration.returnTypeText;
+  if (returnType === "~") {
+    return `~${declaration.name}`;
   }
+  return declaration.name;
+}
 
-  return current;
+function getDocumentSymbolFunctionDetail(returnType: string, argsText: string): string {
+  if (!returnType || returnType === "~") {
+    return `(${argsText})`;
+  }
+  return `${returnType}(${argsText})`;
 }
 
 function sortDocumentSymbolsByRange(symbols: DocumentSymbol[]): void {
